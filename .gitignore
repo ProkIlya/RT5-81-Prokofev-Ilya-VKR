@@ -1,0 +1,36 @@
+# Documentation and local reports stay outside Git by owner decision.
+**/*.md
+!/README.md
+**/*.pdf
+**/*.docx
+**/*.odt
+**/*.rtf
+docs/
+reports/
+.agent/feature-list.json
+
+# Local configuration and secrets.
+.env
+.env.*
+config
+config.*
+*.key
+*.pem
+
+# Local model weights, runtime output, and test evidence.
+*.gguf
+models/
+evidence/
+*.sqlite
+*.sqlite3
+*.db
+
+# Python and editor artifacts.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/

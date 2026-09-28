@@ -1,5 +1,6 @@
 # Documentation and local reports stay outside Git by owner decision.
 **/*.md
+!/README.md
 **/*.pdf
 **/*.docx
 **/*.odt

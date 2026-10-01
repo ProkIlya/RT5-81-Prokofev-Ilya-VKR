@@ -1,0 +1,7 @@
+{
+  "cases": [
+    {"name": "fetch_url", "arguments": {"url": "https://example.com"}},
+    "inspect getPet",
+    {"name": "inspect_operation", "arguments": {"operation_id": "getPet", "url": "https://example.com"}}
+  ]
+}

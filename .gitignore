@@ -21,6 +21,7 @@ config.*
 *.gguf
 models/
 evidence/
+experiments/local_model/runtime/
 *.sqlite
 *.sqlite3
 *.db

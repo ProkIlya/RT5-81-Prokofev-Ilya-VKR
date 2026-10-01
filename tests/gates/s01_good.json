@@ -1,0 +1,5 @@
+{
+  "operation_id": "getPet",
+  "expected_actions": ["inspect_operation", "finish_run"],
+  "expected_response": "200"
+}

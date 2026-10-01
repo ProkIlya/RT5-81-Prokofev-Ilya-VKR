@@ -1,0 +1,8 @@
+{
+  "actions": [
+    {"operation_id": "deletePet"},
+    {"operation_id": "getPet", "url": "http://127.0.0.2:18082/pets/1"},
+    {"operation_id": "getPet", "method": "POST"},
+    "execute getPet"
+  ]
+}

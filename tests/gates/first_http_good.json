@@ -1,0 +1,7 @@
+{
+  "goal": "Получить данные тестового питомца с ID 1 и сообщить фактический результат.",
+  "operation_id": "getPet",
+  "expected_journal": [{"method": "GET", "path": "/pets/1"}],
+  "expected_status": 200,
+  "expected_json": {"id": 1, "name": "Murka"}
+}

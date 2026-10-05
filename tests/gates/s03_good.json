@@ -1,0 +1,126 @@
+{
+  "source": "tests/fixtures/profile_openapi.json",
+  "expected_ids": [
+    "GET /health",
+    "createPet",
+    "getPet"
+  ],
+  "expected_snapshot": {
+    "profile_version": "rest-json-v1",
+    "openapi": "3.0.3",
+    "operations": {
+      "getPet": {
+        "method": "GET",
+        "path": "/pets/{id}",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Auth": {
+              "type": "http",
+              "scheme": "bearer"
+            }
+          }
+        ]
+      },
+      "createPet": {
+        "method": "POST",
+        "path": "/pets",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Auth": {
+              "type": "http",
+              "scheme": "bearer"
+            }
+          }
+        ]
+      },
+      "GET /health": {
+        "method": "GET",
+        "path": "/health",
+        "parameters": [],
+        "responses": {
+          "204": {}
+        },
+        "security": []
+      }
+    },
+    "parser_version": "1"
+  }
+}

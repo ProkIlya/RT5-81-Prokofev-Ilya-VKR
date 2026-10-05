@@ -1,0 +1,73 @@
+{
+  "cases": [
+    {
+      "name": "unsupported_schema",
+      "pointer": [
+        "paths",
+        "/pets/{id}",
+        "get",
+        "responses",
+        "200",
+        "content",
+        "application/json",
+        "schema"
+      ],
+      "value": {
+        "oneOf": []
+      },
+      "code": "unsupported"
+    },
+    {
+      "name": "external_ref",
+      "pointer": [
+        "paths",
+        "/pets/{id}",
+        "get",
+        "responses",
+        "200",
+        "content",
+        "application/json",
+        "schema"
+      ],
+      "value": {
+        "$ref": "http://127.0.0.1:1/forbidden.json"
+      },
+      "code": "external_ref"
+    },
+    {
+      "name": "duplicate_id",
+      "pointer": [
+        "paths",
+        "/pets",
+        "post",
+        "operationId"
+      ],
+      "value": "getPet",
+      "code": "duplicate_operation_id"
+    },
+    {
+      "name": "cyclic_ref",
+      "pointer": [
+        "components",
+        "schemas",
+        "Pet"
+      ],
+      "value": {
+        "$ref": "#/components/schemas/Pet"
+      },
+      "code": "cyclic_ref"
+    },
+    {
+      "name": "server_target",
+      "pointer": [
+        "servers"
+      ],
+      "value": [
+        {
+          "url": "http://127.0.0.1:1"
+        }
+      ],
+      "code": "unsupported"
+    }
+  ]
+}

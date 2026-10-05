@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .socket_deadline import SocketDeadline
+
 
 class PolicyDenied(ValueError):
     """Действие отклонено до побочного эффекта или исчерпан бюджет запуска."""
@@ -102,41 +104,54 @@ class Session:
         connection = http.client.HTTPConnection("127.0.0.1", self.port,
                                                  timeout=min(self.timeout, self.remaining()))
         # Прямой HTTPConnection не использует proxy из среды и не следует redirect.
+        watchdog = None
         try:
-            connection.request("GET", "/pets/1", headers={"Accept": "application/json"})
-            response = connection.getresponse()
-            exchange["response"] = {"status": response.status,
-                "content_type": response.getheader("Content-Type", ""), "json": None}
-            if 300 <= response.status < 400:
-                # Не читаем Location в prompt и не открываем соединение назначения.
-                exchange["outcome"] = "redirect_denied"
-            else:
-                # Читаем ограниченными порциями; лишний байт выявляет превышение.
-                # Общий deadline не позволяет медленному ответу продлевать Run.
-                chunks, size = [], 0
-                while size <= self.max_response_bytes:
-                    remaining = self.remaining()
-                    if connection.sock:
-                        connection.sock.settimeout(min(self.timeout, remaining))
-                    chunk = response.read1(min(4096, self.max_response_bytes + 1 - size))
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    size += len(chunk)
-                if size > self.max_response_bytes:
-                    exchange["outcome"] = "response_limit"
-                elif exchange["response"]["content_type"].split(";")[0].strip() != "application/json":
-                    exchange["outcome"] = "invalid_content_type"
+            connection.connect()
+            # Таймер запускается до отправки запроса и чтения status/headers.
+            # Сохранённый сокет остаётся доступен после getresponse(), даже если
+            # http.client обнулит поле connection.sock у короткого ответа.
+            with SocketDeadline(connection.sock, self.deadline) as watchdog:
+                connection.request("GET", "/pets/1", headers={"Accept": "application/json"})
+                response = connection.getresponse()
+                watchdog.check()
+                exchange["response"] = {"status": response.status,
+                    "content_type": response.getheader("Content-Type", ""), "json": None}
+                if 300 <= response.status < 400:
+                    # Не читаем Location и не открываем соединение назначения.
+                    exchange["outcome"] = "redirect_denied"
                 else:
-                    try:
-                        exchange["response"]["json"] = json.loads(b"".join(chunks))
-                        exchange["outcome"] = "received"
-                    except (ValueError, UnicodeError):
-                        exchange["outcome"] = "invalid_json"
+                    # read1() не сообщает об усечении тела с Content-Length.
+                    # Поэтому после EOF отдельно проверяется оставшаяся длина.
+                    chunks, size = [], 0
+                    while size <= self.max_response_bytes:
+                        watchdog.check()
+                        chunk = response.read1(min(4096, self.max_response_bytes + 1 - size))
+                        watchdog.check()
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        size += len(chunk)
+                    if size > self.max_response_bytes:
+                        exchange["outcome"] = "response_limit"
+                    elif response.length is not None and response.length > 0:
+                        exchange["outcome"] = "incomplete_response"
+                    elif exchange["response"]["content_type"].split(";")[0].strip() != "application/json":
+                        exchange["outcome"] = "invalid_content_type"
+                    else:
+                        try:
+                            exchange["response"]["json"] = json.loads(b"".join(chunks))
+                            exchange["outcome"] = "received"
+                        except (ValueError, UnicodeError):
+                            exchange["outcome"] = "invalid_json"
+                watchdog.check()
         except PolicyDenied:
             exchange["outcome"] = "time_limit"
+        except TimeoutError:
+            exchange["outcome"] = "time_limit" if time.monotonic() >= self.deadline else "transport_error"
+        except http.client.IncompleteRead:
+            exchange["outcome"] = "incomplete_response"
         except (OSError, http.client.HTTPException):
-            exchange["outcome"] = "transport_error"
+            exchange["outcome"] = "time_limit" if watchdog and watchdog.expired else "transport_error"
         finally:
             connection.close()
             exchange["wall_seconds"] = time.monotonic() - started

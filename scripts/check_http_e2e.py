@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from api_agent.first_http import PolicyDenied, Session, load_catalog, loopback_origin, run_goal
+from api_agent.socket_deadline import SocketDeadline
 from demo_api.server import DemoServer
 from experiments.local_model.spike import collect_stream
 
@@ -23,43 +24,57 @@ def save(path, value):
 
 class LocalModel:
     """Адаптер локального llama-server с ограничениями времени и размера SSE."""
-    def __init__(self, base):
+    def __init__(self, base, *, deadline=None, timeout=90):
         self.base, self.port = loopback_origin(base)
+        self.deadline = deadline
+        self.timeout = timeout
 
     def __call__(self, payload):
         started = time.monotonic()
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=90)
+        deadline = min(started + self.timeout, self.deadline) if self.deadline is not None else started + self.timeout
+        remaining = deadline - started
+        if remaining <= 0:
+            raise TimeoutError("LLM/run time budget exhausted")
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=remaining)
         first_token = None
         def mark_token():
             nonlocal first_token
             first_token = time.monotonic() - started
+        watchdog = None
         try:
-            connection.request("POST", "/v1/chat/completions",
-                json.dumps({**payload, "stream": True}).encode(), {"Content-Type": "application/json"})
-            response = connection.getresponse()
-            if response.status != 200:
-                raise RuntimeError(f"local runtime HTTP {response.status}")
-            size = 0
-            def lines():
-                # Ограничиваем и строку SSE, и весь ответ. Время проверяется
-                # перед чтением, включая ожидание ещё не завершённой строки.
-                nonlocal size
-                while True:
-                    remaining = 90 - (time.monotonic() - started)
-                    if remaining <= 0:
-                        raise RuntimeError("LLM time budget exhausted")
-                    response.fp.raw._sock.settimeout(remaining)
-                    line = response.readline(65537)
-                    if not line:
-                        break
-                    size += len(line)
-                    if len(line) > 65536 or size > 1048576:
-                        raise RuntimeError("LLM response budget exhausted")
-                    yield line
-            result = collect_stream(lines(), mark_token)
-            result["_timing"] = {"ttft_seconds": first_token,
-                                  "wall_seconds": time.monotonic() - started}
-            return result
+            connection.connect()
+            # Абсолютный таймер покрывает отправку, медленные заголовки и SSE.
+            with SocketDeadline(connection.sock, deadline) as watchdog:
+                connection.request("POST", "/v1/chat/completions",
+                    json.dumps({**payload, "stream": True}).encode(), {"Content-Type": "application/json"})
+                response = connection.getresponse()
+                watchdog.check()
+                if response.status != 200:
+                    raise RuntimeError(f"local runtime HTTP {response.status}")
+                size = 0
+                def lines():
+                    # Проверка между строками дополняет таймер, который может
+                    # прервать уже ожидающий readline() на уровне сокета.
+                    nonlocal size
+                    while True:
+                        watchdog.check()
+                        line = response.readline(65537)
+                        watchdog.check()
+                        if not line:
+                            break
+                        size += len(line)
+                        if len(line) > 65536 or size > 1048576:
+                            raise RuntimeError("LLM response budget exhausted")
+                        yield line
+                result = collect_stream(lines(), mark_token)
+                watchdog.check()
+                result["_timing"] = {"ttft_seconds": first_token,
+                                      "wall_seconds": time.monotonic() - started}
+                return result
+        except OSError as error:
+            if (watchdog and watchdog.expired) or time.monotonic() >= deadline:
+                raise TimeoutError("LLM/run time budget exhausted") from error
+            raise
         finally:
             connection.close()
 
@@ -146,7 +161,8 @@ def main(mode):
                     raise RuntimeError("model SHA mismatch")
                 session = Session(demo.target, catalog, run_seconds=180)
                 trace = run_goal(fixture["goal"], session,
-                    LocalModel(os.environ.get("S02_LLM_BASE_URL", "http://127.0.0.1:18081")), raw=raw)
+                    LocalModel(os.environ.get("S02_LLM_BASE_URL", "http://127.0.0.1:18081"),
+                               deadline=session.deadline), raw=raw)
                 exchange = trace["exchanges"][0]
                 if (demo.journal != fixture["expected_journal"] or demo.connections != 1
                         or trace["status"] != "completed"
@@ -170,7 +186,9 @@ def main(mode):
     result["python"] = sys.version
     # HEAD ещё может быть базовым commit при проверке незакоммиченного кода.
     # Хеши исходников точно идентифицируют проверенную рабочую версию.
-    sources = ["src/api_agent/first_http.py", "demo_api/server.py", "scripts/check_http_e2e.py",
+    sources = ["src/api_agent/first_http.py", "src/api_agent/socket_deadline.py",
+               "demo_api/server.py", "scripts/check_http_e2e.py",
+               "experiments/local_model/spike.py", "tests/test_transport_deadlines.py",
                "scripts/check_stage.py", "tests/fixtures/demo_openapi.json",
                "tests/gates/first_http_good.json", "tests/gates/first_http_bad.json"]
     result["source_sha256"] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in sources}

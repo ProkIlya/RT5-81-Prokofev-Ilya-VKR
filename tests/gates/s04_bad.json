@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {"name": "repeat_http", "tool": "execute_operation", "arguments": {"operation_id": "getPet"}, "reason": "request_limit", "requests": 1},
+    {"name": "repeat_inspect", "tool": "inspect_operation", "arguments": {"operation_id": "getPet"}, "reason": "no_progress", "requests": 0},
+    {"name": "foreign_url", "tool": "execute_operation", "arguments": {"operation_id": "getPet", "url": "http://127.0.0.2:80/pets/1"}, "reason": "malformed_limit", "requests": 0},
+    {"name": "foreign_operation", "tool": "execute_operation", "arguments": {"operation_id": "deletePet"}, "reason": "malformed_limit", "requests": 0},
+    {"name": "unknown_tool", "tool": "shell", "arguments": {"code": "echo unsafe"}, "reason": "malformed_limit", "requests": 0},
+    {"name": "foreign_evidence", "tool": "finish_run", "arguments": {"summary": "done", "evidence_ids": ["foreign"]}, "reason": "malformed_limit", "requests": 0}
+  ]
+}

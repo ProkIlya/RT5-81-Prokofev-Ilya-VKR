@@ -1,4 +1,4 @@
-"""Проверки срезов S01–S03; запускать из корня с готовым локальным llama-server."""
+"""Проверки срезов S01–S04; запускать из корня с готовым локальным llama-server."""
 
 import hashlib
 import json
@@ -87,6 +87,9 @@ def post_stream(payload):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "S04" and sys.argv[2] in ("good", "bad"):
+        from scripts.check_agent_loop import main as agent_main
+        return agent_main(sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] == "S03" and sys.argv[2] in ("good", "bad"):
         from scripts.check_openapi import main as openapi_main
         return openapi_main(sys.argv[2])
@@ -95,7 +98,7 @@ def main():
         from scripts.check_http_e2e import main as s02_main
         return s02_main(sys.argv[2])
     if len(sys.argv) != 3 or sys.argv[1] != "S01" or sys.argv[2] not in ("good", "bad"):
-        print("usage: python scripts/check_stage.py S01|S02|S03 good|bad", file=sys.stderr)
+        print("usage: python scripts/check_stage.py S01|S02|S03|S04 good|bad", file=sys.stderr)
         return 1
     mode = sys.argv[2]
     evidence = Path(os.environ.get("S01_EVIDENCE_DIR", ROOT / "evidence" / "S01"))

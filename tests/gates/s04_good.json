@@ -1,0 +1,8 @@
+{
+  "goal": "Check the test pet and report the actual observation.",
+  "scenarios": {
+    "good": ["execute_operation", "finish_run"],
+    "invalid_json": ["execute_operation", "inspect_operation", "finish_run"]
+  },
+  "live_actions": ["execute_operation", "finish_run"]
+}

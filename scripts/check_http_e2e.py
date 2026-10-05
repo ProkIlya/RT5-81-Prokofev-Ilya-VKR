@@ -13,70 +13,12 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from api_agent.first_http import PolicyDenied, Session, load_catalog, loopback_origin, run_goal
-from api_agent.socket_deadline import SocketDeadline
+from api_agent.agent.model import LocalModel
 from demo_api.server import DemoServer
-from experiments.local_model.spike import collect_stream
 
 
 def save(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-class LocalModel:
-    """Адаптер локального llama-server с ограничениями времени и размера SSE."""
-    def __init__(self, base, *, deadline=None, timeout=90):
-        self.base, self.port = loopback_origin(base)
-        self.deadline = deadline
-        self.timeout = timeout
-
-    def __call__(self, payload):
-        started = time.monotonic()
-        deadline = min(started + self.timeout, self.deadline) if self.deadline is not None else started + self.timeout
-        remaining = deadline - started
-        if remaining <= 0:
-            raise TimeoutError("LLM/run time budget exhausted")
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=remaining)
-        first_token = None
-        def mark_token():
-            nonlocal first_token
-            first_token = time.monotonic() - started
-        watchdog = None
-        try:
-            connection.connect()
-            # Абсолютный таймер покрывает отправку, медленные заголовки и SSE.
-            with SocketDeadline(connection.sock, deadline) as watchdog:
-                connection.request("POST", "/v1/chat/completions",
-                    json.dumps({**payload, "stream": True}).encode(), {"Content-Type": "application/json"})
-                response = connection.getresponse()
-                watchdog.check()
-                if response.status != 200:
-                    raise RuntimeError(f"local runtime HTTP {response.status}")
-                size = 0
-                def lines():
-                    # Проверка между строками дополняет таймер, который может
-                    # прервать уже ожидающий readline() на уровне сокета.
-                    nonlocal size
-                    while True:
-                        watchdog.check()
-                        line = response.readline(65537)
-                        watchdog.check()
-                        if not line:
-                            break
-                        size += len(line)
-                        if len(line) > 65536 or size > 1048576:
-                            raise RuntimeError("LLM response budget exhausted")
-                        yield line
-                result = collect_stream(lines(), mark_token)
-                watchdog.check()
-                result["_timing"] = {"ttft_seconds": first_token,
-                                      "wall_seconds": time.monotonic() - started}
-                return result
-        except OSError as error:
-            if (watchdog and watchdog.expired) or time.monotonic() >= deadline:
-                raise TimeoutError("LLM/run time budget exhausted") from error
-            raise
-        finally:
-            connection.close()
 
 
 def bad_gate(demo, forbidden, catalog, directory):

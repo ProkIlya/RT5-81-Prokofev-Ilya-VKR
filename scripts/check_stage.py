@@ -1,4 +1,4 @@
-"""S01 gate. Run from the repository root with a local llama-server already listening."""
+"""Проверки срезов S01/S02; запускать из корня с готовым локальным llama-server."""
 
 import hashlib
 import json
@@ -87,8 +87,12 @@ def post_stream(payload):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "S02" and sys.argv[2] in ("good", "bad"):
+        # Сохраняем общий CLI плана, а реализацию сетевого gate держим отдельно.
+        from scripts.check_http_e2e import main as s02_main
+        return s02_main(sys.argv[2])
     if len(sys.argv) != 3 or sys.argv[1] != "S01" or sys.argv[2] not in ("good", "bad"):
-        print("usage: python scripts/check_stage.py S01 good|bad", file=sys.stderr)
+        print("usage: python scripts/check_stage.py S01|S02 good|bad", file=sys.stderr)
         return 1
     mode = sys.argv[2]
     evidence = Path(os.environ.get("S01_EVIDENCE_DIR", ROOT / "evidence" / "S01"))

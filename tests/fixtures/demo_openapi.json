@@ -1,0 +1,20 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "S02 Demo", "version": "1.0.0"},
+  "paths": {
+    "/pets/1": {
+      "get": {
+        "operationId": "getPet",
+        "responses": {
+          "200": {
+            "description": "Known test pet",
+            "content": {"application/json": {"schema": {
+              "type": "object", "required": ["id", "name"],
+              "properties": {"id": {"type": "integer"}, "name": {"type": "string"}}
+            }}}
+          }
+        }
+      }
+    }
+  }
+}

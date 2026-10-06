@@ -211,6 +211,32 @@ class StartAgentRun:
                 "malformed_calls": 0,
                 "final": None,
             }
+            # Снимок и hashes должны описывать одно доступное основание. Маска
+            # literal enum, имени поля или pointer меняет контракт, поэтому
+            # redaction не может служить его каноническим преобразованием.
+            # Проверяем весь поддержанный снимок и идентичность basis ДО записи
+            # и любых действий. Аннотации уже удалены профилем S03 до hashes.
+            identity = {
+                "contract": run["contract"],
+                "spec_hash": run["spec_hash"],
+                "operation_hash": run["operation_hash"],
+                "basis": {
+                    "source": "CONTRACT",
+                    "operation_id": "getPet",
+                    "pointer": "/responses/200",
+                },
+            }
+            if self.safe(identity) != identity:
+                # Нельзя сохранять секретное ограничение или объявлять маску
+                # эквивалентным enum. У отказанного Run нет contract/hashes и
+                # CONTRACT expectation; причина безопасна и не содержит значения.
+                run.update(
+                    contract=None,
+                    spec_hash=None,
+                    operation_hash=None,
+                    status="blocked",
+                    stop_reason="contract_redaction_conflict",
+                )
             # Регистрация раньше запуска исключает повтор HTTP после ошибки trace.
             self._runs[message_id] = self.safe(run)
             result = self._loop(run, model, cancel or threading.Event())
@@ -232,7 +258,8 @@ class StartAgentRun:
         )
         session.run_id = run["run_id"]
         try:
-            self._drive_loop(run, model, cancel, session, started)
+            if run["stop_reason"] is None:
+                self._drive_loop(run, model, cancel, session, started)
         except Exception:
             run["stop_reason"] = "runtime_error"
             run["status"] = "failed"

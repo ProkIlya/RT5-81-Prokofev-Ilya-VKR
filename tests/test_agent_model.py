@@ -11,6 +11,27 @@ sys.path.insert(0, str(ROOT))
 
 
 class AgentModelTests(unittest.TestCase):
+    def test_controlled_eof_after_large_post_is_not_connection_reset(self):
+        from api_agent.agent.model import LocalModel
+        from test_transport_deadlines import serve_raw
+
+        port, thread = serve_raw([(b"HTTP/1.0 200 OK\r\n\r\n", 0)])
+        model = LocalModel(f"http://127.0.0.1:{port}", timeout=2)
+        with self.assertRaises(RuntimeError) as raised:
+            model({"messages": [], "padding": "x" * 200000})
+        self.assertEqual(raised.exception.code, "model_incomplete_stream")
+        thread.join(3)
+
+    def test_intentional_reset_has_transport_error_code(self):
+        from api_agent.agent.model import LocalModel, ModelError
+        from test_transport_deadlines import serve_raw
+
+        port, thread = serve_raw([], reset=True)
+        with self.assertRaises(ModelError) as raised:
+            LocalModel(f"http://127.0.0.1:{port}", timeout=2)({"messages": []})
+        self.assertEqual(raised.exception.code, "model_transport_error")
+        thread.join(3)
+
     def test_new_run_deadline_does_not_inherit_expired_previous_run(self):
         from api_agent.agent.model import LocalModel
         from test_transport_deadlines import serve_raw

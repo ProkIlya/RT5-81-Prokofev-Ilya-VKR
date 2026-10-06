@@ -139,9 +139,13 @@ class Session:
                         exchange["outcome"] = "invalid_content_type"
                     else:
                         try:
-                            exchange["response"]["json"] = json.loads(b"".join(chunks))
+                            from .bounded_json import validate_tree
+
+                            parsed = json.loads(b"".join(chunks))
+                            validate_tree(parsed, max_bytes=self.max_response_bytes)
+                            exchange["response"]["json"] = parsed
                             exchange["outcome"] = "received"
-                        except (ValueError, UnicodeError):
+                        except (ValueError, UnicodeError, RecursionError):
                             exchange["outcome"] = "invalid_json"
                 watchdog.check()
         except PolicyDenied:

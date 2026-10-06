@@ -22,7 +22,7 @@ CATALOG = load_catalog(ROOT / "tests/fixtures/demo_openapi.json")
 PET = b'{"id":1,"name":"Murka"}'
 
 
-def serve_raw(response_parts):
+def serve_raw(response_parts, *, reset=False):
     """Вернуть порт и поток однократного управляемого локального сервера.
 
     Каждый элемент задаёт байты и задержку между ними; разрыв соединения
@@ -38,7 +38,44 @@ def serve_raw(response_parts):
             connection, _ = listener.accept()
             with connection:
                 connection.settimeout(2)
-                connection.recv(8192)
+                request_deadline = time.monotonic() + 2
+
+                def receive(size):
+                    remaining = request_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("fixture request deadline")
+                    connection.settimeout(remaining)
+                    return connection.recv(size)
+                # HTTP POST может прийти несколькими recv. Сначала читаем весь
+                # header, затем ровно Content-Length; иначе close даёт RST
+                # вместо контролируемого EOF. Размер и ожидание конечны.
+                request = bytearray()
+                while b"\r\n\r\n" not in request:
+                    chunk = receive(4096)
+                    if not chunk:
+                        return
+                    request.extend(chunk)
+                    if len(request) > 65536:
+                        return
+                header, body = bytes(request).split(b"\r\n\r\n", 1)
+                length = 0
+                for line in header.split(b"\r\n")[1:]:
+                    key, _, value = line.partition(b":")
+                    if key.lower() == b"content-length":
+                        length = int(value.strip())
+                if length < 0 or length > 1048576:
+                    return
+                remaining = length - len(body)
+                while remaining > 0:
+                    chunk = receive(min(4096, remaining))
+                    if not chunk:
+                        return
+                    remaining -= len(chunk)
+                if reset:
+                    import struct
+
+                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh" if sys.platform == "win32" else "ii", 1, 0))
+                    return
                 for data, delay in response_parts:
                     for byte in data:
                         try:

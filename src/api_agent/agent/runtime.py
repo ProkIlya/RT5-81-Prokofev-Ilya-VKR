@@ -16,6 +16,8 @@ import uuid
 
 from ..first_http import Session, loopback_origin
 from ..openapi.parser import canonical
+from ..bounded_json import validate_tree, numeric_metadata
+from .model import ModelError, ModelTimeout
 
 
 @dataclass(frozen=True)
@@ -145,15 +147,24 @@ class StartAgentRun:
         Это конечная классификация приложения, не обещание распознать неизвестный
         секрет. Необработанные exceptions и ответы модели в evidence не записываются.
         """
-        if isinstance(value, str):
-            for secret in self.secrets:
-                value = value.replace(secret, "[REDACTED]")
-            return value
-        if isinstance(value, dict):
-            return {self.safe(k): self.safe(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self.safe(v) for v in value]
-        return value
+        # Run содержит несколько уже ограниченных фрагментов и обёртки trace.
+        # Его конечный бюджет шире бюджета одного ответа, глубина всё ещё
+        # значительно меньше стека Python. Недоверенный model response
+        # проверяется отдельно до попадания сюда с более строгими пределами.
+        validate_tree(value, max_depth=96, max_nodes=100000, max_bytes=4194304)
+
+        def redact(item):
+            if isinstance(item, str):
+                for secret in self.secrets:
+                    item = item.replace(secret, "[REDACTED]")
+                return item
+            if isinstance(item, dict):
+                return {redact(k): redact(v) for k, v in item.items()}
+            if isinstance(item, list):
+                return [redact(v) for v in item]
+            return item
+
+        return redact(value)
 
     def start(self, project_id, session_id, message_id, goal, model, *, cancel=None):
         """Принять команду приложения; идентичный message_id возвращает снимок Run.
@@ -207,15 +218,55 @@ class StartAgentRun:
             return deepcopy(self._runs[message_id])
 
     def _loop(self, run, model, cancel):
-        """Исполнять только известные инструменты; каждый observation влияет на контекст."""
+        """Гарантировать итоговый Run даже при неожиданном отказе компонента.
+
+        Транспорт уже учитывает попытку до сети и сохраняет exchange в finally.
+        На аварийном выходе берём эти счётчики, а не начальный снимок команды.
+        Отказ redaction сохраняет лишь собственные безопасные metadata, без body.
+        """
         started = self.clock()
-        deadline = started + self.limits.max_seconds
         session = Session(
             self.target,
             {"getPet": {"method": "GET", "path": "/pets/1"}},
             run_seconds=self.limits.max_seconds,
         )
         session.run_id = run["run_id"]
+        try:
+            self._drive_loop(run, model, cancel, session, started)
+        except Exception:
+            run["stop_reason"] = "runtime_error"
+            run["status"] = "failed"
+        finally:
+            run["requests"] = session.requests
+            if len(run["exchanges"]) != len(session.exchanges):
+                run["exchanges"] = []
+                for exchange in session.exchanges:
+                    try:
+                        run["exchanges"].append(self.safe(exchange))
+                    except (ValueError, RecursionError):
+                        run["exchanges"].append(
+                            {
+                                "id": exchange["id"],
+                                "run_id": run["run_id"],
+                                "operation_id": "getPet",
+                                "response": None,
+                                "outcome": "response_structure_error",
+                            }
+                        )
+            run["wall_seconds"] = self.clock() - started
+            if not run["stop_reason"]:
+                run["stop_reason"] = "runtime_error"
+                run["status"] = "failed"
+            try:
+                self.trace_sink(deepcopy(self.safe(run)))
+            except Exception:
+                run["stop_reason"] = "trace_error"
+                run["status"] = "failed"
+        return run
+
+    def _drive_loop(self, run, model, cancel, session, started):
+        """Исполнять только известные инструменты; каждый observation влияет на контекст."""
+        deadline = started + self.limits.max_seconds
         # Настоящий адаптер обязан ограничивать блокирующий I/O абсолютным deadline.
         if hasattr(model, "set_deadline"):
             model.set_deadline(session.deadline)
@@ -286,16 +337,54 @@ class StartAgentRun:
                 break
             try:
                 response = model(payload)
-            except Exception:
-                stop("model_error", "failed")
+            except Exception as error:
+                # Даже исключение модели не отменяет более приоритетный cancel
+                # или исчерпанный общий deadline. Raw error не сохраняется.
+                code = "model_error"
+                if isinstance(error, ModelTimeout):
+                    code = "model_timeout"
+                elif isinstance(error, ModelError) and error.code in {
+                    "model_http_error",
+                    "model_response_limit",
+                    "model_transport_error",
+                    "model_malformed_stream",
+                    "model_incomplete_stream",
+                    "model_generation_limit",
+                }:
+                    code = error.code
+                if isinstance(error, (ModelError, ModelTimeout)):
+                    try:
+                        validate_tree(error.timing)
+                        step["timing"] = numeric_metadata(
+                            error.timing, ("ttft_seconds", "wall_seconds")
+                        )
+                        if isinstance(error, ModelError) and error.finish_reason in (
+                            "length",
+                            "stop",
+                            "tool_calls",
+                        ):
+                            step["finish_reason"] = error.finish_reason
+                    except (ValueError, TypeError):
+                        pass
+                step["observation"] = {"code": code}
+                if not guard():
+                    break
+                stop(code, "failed")
                 break
             if not guard():
                 break
-            if isinstance(response, dict):
-                step["timing"] = response.get("_timing", {})
-                step["usage"] = response.get("usage", {})
+            executing = False
             try:
+                validate_tree(response)
+                timing = numeric_metadata(
+                    response.get("_timing", {}), ("ttft_seconds", "wall_seconds")
+                )
+                usage = numeric_metadata(
+                    response.get("usage", {}),
+                    ("prompt_tokens", "completion_tokens", "total_tokens"),
+                )
                 call, action = self._decision(response)
+                step["timing"], step["usage"] = timing, usage
                 step["action"] = self.safe(action)
                 name, args = action["name"], action["arguments"]
                 if name == "finish_run":
@@ -345,8 +434,10 @@ class StartAgentRun:
                     if not persist() or not guard():
                         break
                     run["requests"] += 1
+                    executing = True
                     exchange = session.execute(args)
                     run["exchanges"].append(self.safe(exchange))
+                    executing = False
                     observation = {
                         "exchange_id": exchange["id"],
                         "outcome": exchange["outcome"],
@@ -375,7 +466,20 @@ class StartAgentRun:
                         },
                     ]
                 )
-            except (ValueError, TypeError, KeyError, IndexError):
+            except (
+                ValueError,
+                TypeError,
+                KeyError,
+                IndexError,
+                AttributeError,
+                RecursionError,
+            ):
+                if executing:
+                    # После сетевой попытки это отказ исполнения, а не ошибка
+                    # аргументов модели. Продолжать correction loop нельзя.
+                    step["observation"] = {"code": "runtime_error"}
+                    stop("runtime_error", "failed")
+                    break
                 run["malformed_calls"] += 1
                 step["observation"] = {"code": "invalid_tool_call"}
                 if run["malformed_calls"] > self.limits.malformed_retries:
@@ -390,9 +494,6 @@ class StartAgentRun:
                 )
             if not persist():
                 break
-        run["wall_seconds"] = self.clock() - started
-        persist()
-        return run
 
     def _decision(self, response):
         """Не доверять JSON-схеме runtime: повторно проверить форму и семантику."""

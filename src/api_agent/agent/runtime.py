@@ -177,10 +177,10 @@ class StartAgentRun:
                 raise ValueError("invalid command")
         with self._lock:
             if message_id in self._runs:
-                run = self._runs[message_id]
-                if (run["project_id"], run["session_id"]) != (project_id, session_id):
+                entry = self._runs[message_id]
+                if entry["scope"] != (project_id, session_id):
                     raise ValueError("message scope mismatch")
-                return deepcopy(run)
+                return deepcopy(entry["run"])
             run = {
                 "run_id": str(uuid.uuid4()),
                 "project_id": project_id,
@@ -238,10 +238,15 @@ class StartAgentRun:
                     stop_reason="contract_redaction_conflict",
                 )
             # Регистрация раньше запуска исключает повтор HTTP после ошибки trace.
-            self._runs[message_id] = self.safe(run)
+            # Исходные trusted IDs — приватная authority, только в памяти под
+            # lock. Маскированный DTO не определяет принадлежность команды:
+            # разные исходные ID могут иметь одинаковое отображение. Scope
+            # никогда не передаётся в sink, prompt, исключения или public return.
+            entry = {"scope": (project_id, session_id), "run": self.safe(run)}
+            self._runs[message_id] = entry
             result = self._loop(run, model, cancel or threading.Event())
-            self._runs[message_id] = self.safe(result)
-            return deepcopy(self._runs[message_id])
+            entry["run"] = self.safe(result)
+            return deepcopy(entry["run"])
 
     def _loop(self, run, model, cancel):
         """Гарантировать итоговый Run даже при неожиданном отказе компонента.

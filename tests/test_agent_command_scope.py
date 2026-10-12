@@ -20,6 +20,9 @@ from agent_support import ObserverModel
 CANARY = "R3-SCOPE-CANARY"
 
 
+from agent_support import count_test_tokens
+
+
 class CommandScopeTests(unittest.TestCase):
     def exercise(
         self, ids, *, secrets=(CANARY,), terminal="completed", concurrent=False
@@ -47,11 +50,17 @@ class CommandScopeTests(unittest.TestCase):
 
         with DemoServer() as demo:
             app = StartAgentRun(
-                demo.target, parse_document(document), secrets=secrets, trace_sink=sink
+                demo.target,
+                parse_document(document),
+                token_counter=count_test_tokens,
+                secrets=secrets,
+                trace_sink=sink,
             )
 
             def start(scope=ids[:2], message=ids[2], goal=ids[3]):
-                return app.start(*scope, message, goal, model, cancel=cancel)
+                return app.start(
+                    *scope, message, goal, model, checks_only=True, cancel=cancel
+                )
 
             # Неожиданный внутренний отказ моделируем после реального HTTP:
             # проверяем дедупликацию терминального Run с сохранённым exchange.
@@ -158,17 +167,30 @@ class CommandScopeTests(unittest.TestCase):
         document = json.loads((ROOT / "tests/fixtures/demo_openapi.json").read_text())
         with DemoServer() as demo:
             app = StartAgentRun(
-                demo.target, parse_document(document), secrets=(CANARY,)
+                demo.target,
+                parse_document(document),
+                token_counter=count_test_tokens,
+                secrets=(CANARY,),
             )
             first_ids = (CANARY,) * 3
             alias_ids = ("[REDACTED]",) * 3
-            first = app.start(*first_ids, "Check pet", ObserverModel())
-            second = app.start(*alias_ids, "Check pet", ObserverModel())
+            first = app.start(
+                *first_ids, "Check pet", ObserverModel(), checks_only=True
+            )
+            second = app.start(
+                *alias_ids, "Check pet", ObserverModel(), checks_only=True
+            )
             self.assertNotEqual(first["run_id"], second["run_id"])
             for field in ("project_id", "session_id", "message_id"):
                 self.assertEqual(first[field], second[field])
-            self.assertEqual(app.start(*first_ids, "Changed", ObserverModel()), first)
-            self.assertEqual(app.start(*alias_ids, "Changed", ObserverModel()), second)
+            self.assertEqual(
+                app.start(*first_ids, "Changed", ObserverModel(), checks_only=True),
+                first,
+            )
+            self.assertEqual(
+                app.start(*alias_ids, "Changed", ObserverModel(), checks_only=True),
+                second,
+            )
             self.assertEqual(len(demo.journal), 2)
 
 

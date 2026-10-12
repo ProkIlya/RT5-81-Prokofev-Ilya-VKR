@@ -28,6 +28,9 @@ def digest(value):
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
+from agent_support import count_test_tokens
+
+
 class ContractHistoryTests(unittest.TestCase):
     def document(self):
         return json.loads((ROOT / "tests/fixtures/demo_openapi.json").read_text())
@@ -45,10 +48,18 @@ class ContractHistoryTests(unittest.TestCase):
             def sink(run):
                 snapshots.append((run, len(demo.journal)))
 
-            app = StartAgentRun(demo.target, catalog, trace_sink=sink, secrets=secrets)
-            run = app.start("p", "s", "m", "Check pet", model)
+            app = StartAgentRun(
+                demo.target,
+                catalog,
+                token_counter=count_test_tokens,
+                trace_sink=sink,
+                secrets=secrets,
+            )
+            run = app.start("p", "s", "m", "Check pet", model, checks_only=True)
             counts = (len(payloads), len(demo.journal))
-            duplicate = app.start("p", "s", "m", "Changed goal", model)
+            duplicate = app.start(
+                "p", "s", "m", "Changed goal", model, checks_only=True
+            )
             self.assertEqual(duplicate, run)
             self.assertEqual(counts, (len(payloads), len(demo.journal)))
             self.assertEqual(snapshots[-1][0], run)

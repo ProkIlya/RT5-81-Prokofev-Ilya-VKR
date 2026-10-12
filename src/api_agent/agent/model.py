@@ -10,7 +10,7 @@ import time
 from ..first_http import loopback_origin
 from ..socket_deadline import SocketDeadline
 from experiments.local_model.spike import collect_stream
-from ..bounded_json import validate_tree
+from ..bounded_json import validate_tree, numeric_metadata
 
 
 class ModelError(RuntimeError):
@@ -49,6 +49,86 @@ class LocalModel:
         """
         self._run_deadline = deadline
 
+    def _json_request(self, path, payload):
+        """Вызвать только внутренний endpoint того же фиксированного runtime.
+
+        Абсолютный deadline покрывает tokenizer так же, как generation.
+        Redirect, proxy и произвольные URL не разрешены; ответ ограничен.
+        """
+        started = time.monotonic()
+        deadline = min(
+            v
+            for v in (started + self.timeout, self.deadline, self._run_deadline)
+            if v is not None
+        )
+        if deadline <= started:
+            raise ModelTimeout()
+        validate_tree(payload)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=deadline - started
+        )
+        try:
+            connection.connect()
+            with SocketDeadline(connection.sock, deadline) as watchdog:
+                connection.request(
+                    "POST",
+                    path,
+                    json.dumps(payload).encode(),
+                    {"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                watchdog.check()
+                if response.status != 200:
+                    raise ModelError("tokenizer_http_error")
+                raw = response.read(1048577)
+                watchdog.check()
+                if len(raw) > 1048576:
+                    raise ModelError("tokenizer_response_limit")
+                result = json.loads(raw)
+                validate_tree(result)
+                return result
+        except ModelError:
+            raise
+        except (OSError, http.client.HTTPException, ValueError, RecursionError):
+            raise ModelError("tokenizer_error") from None
+        finally:
+            connection.close()
+
+    def count_tokens(self, payload):
+        """Считать полный фактический chat template, включая tools и роли.
+
+        Используется tokenizer именно загруженного GGUF; оценка bytes/4 не
+        применяется. BOS уже находится в шаблоне: add_special=false,
+        parse_special=true совпадают с разбором сформированного prompt.
+        Совпадение с actual prompt_tokens отдельно проверяет TokenBudget.
+        """
+        data = {
+            key: payload[key]
+            for key in ("messages", "tools", "tool_choice")
+            if key in payload
+        }
+        rendered = self._json_request("/apply-template", data)
+        if not isinstance(rendered, dict) or not isinstance(
+            rendered.get("prompt"), str
+        ):
+            raise ModelError("tokenizer_template_error")
+        result = self._json_request(
+            "/tokenize",
+            {
+                "content": rendered["prompt"],
+                "add_special": False,
+                "parse_special": True,
+            },
+        )
+        tokens = result.get("tokens") if isinstance(result, dict) else None
+        if (
+            not isinstance(tokens, list)
+            or not tokens
+            or any(type(t) is not int or t < 0 for t in tokens)
+        ):
+            raise ModelError("tokenizer_invalid_tokens")
+        return len(tokens)
+
     def __call__(self, payload):
         started = time.monotonic()
         deadline = min(
@@ -84,7 +164,13 @@ class LocalModel:
                 connection.request(
                     "POST",
                     "/v1/chat/completions",
-                    json.dumps({**payload, "stream": True}).encode(),
+                    json.dumps(
+                        {
+                            **payload,
+                            "stream": True,
+                            "stream_options": {"include_usage": True},
+                        }
+                    ).encode(),
                     {"Content-Type": "application/json"},
                 )
                 response = connection.getresponse()
@@ -93,11 +179,12 @@ class LocalModel:
                     raise ModelError("model_http_error", timing=timing())
                 size = 0
                 saw_done = False
+                usage = None
 
                 def lines():
                     # Проверка между строками дополняет таймер, который может
                     # прервать уже ожидающий readline() на уровне сокета.
-                    nonlocal size, saw_done
+                    nonlocal size, saw_done, usage
                     while True:
                         watchdog.check()
                         line = response.readline(65537)
@@ -113,7 +200,30 @@ class LocalModel:
                             line.startswith(b"data: ")
                             and line.strip() != b"data: [DONE]"
                         ):
-                            validate_tree(json.loads(line[6:]))
+                            event = json.loads(line[6:])
+                            validate_tree(event)
+                            if event.get("usage") is not None:
+                                raw_usage = event["usage"]
+                                if not isinstance(raw_usage, dict):
+                                    raise ValueError("invalid_usage")
+                                usage = numeric_metadata(
+                                    {
+                                        k: raw_usage[k]
+                                        for k in (
+                                            "prompt_tokens",
+                                            "completion_tokens",
+                                            "total_tokens",
+                                        )
+                                        if k in raw_usage
+                                    },
+                                    (
+                                        "prompt_tokens",
+                                        "completion_tokens",
+                                        "total_tokens",
+                                    ),
+                                )
+                                if event.get("choices") == []:
+                                    continue
                         if line.strip() == b"data: [DONE]":
                             saw_done = True
                         yield line
@@ -134,7 +244,10 @@ class LocalModel:
                         ),
                         timing=timing(),
                     )
-                if finish != "tool_calls":
+                if finish not in ("tool_calls", "stop") or (
+                    finish == "stop"
+                    and result["choices"][0]["message"].get("tool_calls")
+                ):
                     raise ModelError(
                         (
                             "model_generation_limit"
@@ -144,6 +257,8 @@ class LocalModel:
                         finish_reason=finish if finish in ("length", "stop") else None,
                         timing=timing(),
                     )
+                if usage is not None:
+                    result["usage"] = usage
                 result["_timing"] = timing()
                 return result
         except ModelError:

@@ -12,10 +12,11 @@ import uuid
 
 from . import StartAgentRun
 from .model import LocalModel
+from .resilience import JsonlJournal
 from ..openapi import load_source
 
 
-def main(argv=None, *, model=None):
+def main(argv=None, *, model=None, token_counter=None):
     """Передать команду StartAgentRun и показать безопасный итог без нового HTTP."""
     parser = argparse.ArgumentParser(description="Run restricted local API agent")
     parser.add_argument("goal")
@@ -23,6 +24,10 @@ def main(argv=None, *, model=None):
     parser.add_argument("--spec", required=True)
     parser.add_argument("--llm-target", default="http://127.0.0.1:18081")
     parser.add_argument("--evidence-dir", default="evidence/agent")
+    parser.add_argument(
+        "--conditions",
+        help="JSON файл явных условий пользователя: predicate, parameters, intent, preconditions",
+    )
     args = parser.parse_args(argv)
     try:
         catalog = load_source(args.spec, target=args.target)
@@ -35,13 +40,42 @@ def main(argv=None, *, model=None):
                 json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
-        app = StartAgentRun(args.target, catalog, trace_sink=sink)
+        message_id = str(uuid.uuid4())
+        conditions = None
+        if args.conditions:
+            descriptors = json.loads(Path(args.conditions).read_text(encoding="utf-8"))
+            if not isinstance(descriptors, list) or not 1 <= len(descriptors) <= 7:
+                raise ValueError("invalid_conditions")
+            conditions = []
+            for descriptor in descriptors:
+                if not isinstance(descriptor, dict) or set(descriptor) != {
+                    "predicate",
+                    "parameters",
+                    "intent",
+                    "preconditions",
+                }:
+                    raise ValueError("invalid_condition")
+                conditions.append(
+                    {
+                        **descriptor,
+                        "source": "USER_DEFINED",
+                        "basis": {"message_id": message_id},
+                    }
+                )
+        app = StartAgentRun(
+            args.target,
+            catalog,
+            trace_sink=sink,
+            token_counter=token_counter,
+            event_sink=JsonlJournal(directory),
+        )
         run = app.start(
             "cli-project",
             "cli-session",
-            str(uuid.uuid4()),
+            message_id,
             args.goal,
             model if model is not None else LocalModel(args.llm_target),
+            conditions=conditions,
         )
         print(
             json.dumps(
@@ -51,6 +85,15 @@ def main(argv=None, *, model=None):
                     "stop_reason": run["stop_reason"],
                     "requests": run["requests"],
                     "trace": str(directory / (run["run_id"] + ".json")),
+                    "journal": str(directory / (run["run_id"] + ".jsonl")),
+                    "summary": run["report"]["summary"],
+                    "contract_verdict": run["report"]["contract_verdict"],
+                    "intent_verdict": run["report"]["intent_verdict"],
+                    "issues": run["report"]["issues"],
+                    "issues_total": run["report"]["issues_total"],
+                    "issue_details_truncated": run["report"]["issue_details_truncated"],
+                    "intent_results": run["report"]["intent_results"],
+                    "completion_scope": "supported_checks_only",
                 },
                 ensure_ascii=False,
             )

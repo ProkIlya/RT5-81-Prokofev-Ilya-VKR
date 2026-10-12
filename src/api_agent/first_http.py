@@ -15,6 +15,11 @@ from urllib.parse import urlsplit
 from .socket_deadline import SocketDeadline
 
 
+def reject_json_constant(_value):
+    """NaN/Infinity не являются JSON: не путать их с пределом приложения."""
+    raise json.JSONDecodeError("nonfinite JSON constant", "", 0)
+
+
 class PolicyDenied(ValueError):
     """Действие отклонено до побочного эффекта или исчерпан бюджет запуска."""
 
@@ -119,6 +124,8 @@ class Session:
             "request": {"method": "GET", "url": url},
             "response": None,
             "outcome": "transport_error",
+            "bytes_total": 0,
+            "truncated": False,
         }
         started = time.monotonic()
         connection = http.client.HTTPConnection(
@@ -159,25 +166,45 @@ class Session:
                             break
                         chunks.append(chunk)
                         size += len(chunk)
+                    exchange["bytes_total"] = size
                     if size > self.max_response_bytes:
+                        exchange["truncated"] = True
                         exchange["outcome"] = "response_limit"
                     elif response.length is not None and response.length > 0:
+                        exchange["truncated"] = True
                         exchange["outcome"] = "incomplete_response"
-                    elif (
-                        exchange["response"]["content_type"].split(";")[0].strip()
-                        != "application/json"
-                    ):
-                        exchange["outcome"] = "invalid_content_type"
                     else:
                         try:
                             from .bounded_json import validate_tree
 
-                            parsed = json.loads(b"".join(chunks))
-                            validate_tree(parsed, max_bytes=self.max_response_bytes)
-                            exchange["response"]["json"] = parsed
-                            exchange["outcome"] = "received"
-                        except (ValueError, UnicodeError, RecursionError):
+                            parsed = json.loads(
+                                b"".join(chunks), parse_constant=reject_json_constant
+                            )
+                        except (json.JSONDecodeError, UnicodeError):
+                            exchange["response"]["json_valid"] = False
                             exchange["outcome"] = "invalid_json"
+                        except (ValueError, RecursionError):
+                            # Ограничение глубины/чисел — предел приложения,
+                            # а не доказательство дефекта полного JSON API.
+                            exchange["outcome"] = "response_structure_error"
+                        else:
+                            try:
+                                validate_tree(parsed, max_bytes=self.max_response_bytes)
+                            except (ValueError, RecursionError):
+                                exchange["outcome"] = "response_structure_error"
+                            else:
+                                exchange["response"]["json"] = parsed
+                                exchange["response"]["json_valid"] = True
+                                exchange["outcome"] = "received"
+                    if (
+                        exchange["outcome"] in {"received", "invalid_json"}
+                        and exchange["response"]["content_type"]
+                        .split(";")[0]
+                        .strip()
+                        .lower()
+                        != "application/json"
+                    ):
+                        exchange["outcome"] = "invalid_content_type"
                 watchdog.check()
         except PolicyDenied:
             exchange["outcome"] = "time_limit"

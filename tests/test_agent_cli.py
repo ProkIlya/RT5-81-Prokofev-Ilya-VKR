@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT), str(ROOT / "tests")]
 from demo_api.server import DemoServer
-from agent_support import ObserverModel
+from agent_support import ObserverModel, count_test_tokens
 
 
 class AgentCliTests(unittest.TestCase):
@@ -28,6 +28,7 @@ class AgentCliTests(unittest.TestCase):
                     "Check pet",
                 ],
                 model=ObserverModel(),
+                token_counter=count_test_tokens,
             )
             self.assertEqual(code, 0)
             traces = list(Path(directory).glob("*.json"))
@@ -52,6 +53,7 @@ class AgentCliTests(unittest.TestCase):
                         "Check pet",
                     ],
                     model=ObserverModel(),
+                    token_counter=count_test_tokens,
                 ),
                 1,
             )

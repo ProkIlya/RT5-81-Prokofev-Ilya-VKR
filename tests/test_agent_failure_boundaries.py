@@ -17,6 +17,9 @@ from agent_support import ObserverModel, reply
 from test_transport_deadlines import serve_raw
 
 
+from agent_support import count_test_tokens
+
+
 class FailureBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.catalog = parse_document(
@@ -24,10 +27,12 @@ class FailureBoundaryTests(unittest.TestCase):
         )
 
     def assert_terminal(self, app, model, snapshots, **kwargs):
-        run = app.start("p", "s", "m", "Check pet", model, **kwargs)
+        run = app.start("p", "s", "m", "Check pet", model, checks_only=True, **kwargs)
         self.assertTrue(run["stop_reason"])
         self.assertEqual(snapshots[-1], run)
-        self.assertEqual(app.start("p", "s", "m", "Check pet", model), run)
+        self.assertEqual(
+            app.start("p", "s", "m", "Check pet", model, checks_only=True), run
+        )
         return run
 
     def test_deep_http_json_has_terminal_trace_and_duplicate_without_http(self):
@@ -41,6 +46,7 @@ class FailureBoundaryTests(unittest.TestCase):
                 app = StartAgentRun(
                     f"http://127.0.0.1:{port}",
                     self.catalog,
+                    token_counter=count_test_tokens,
                     trace_sink=snapshots.append,
                 )
                 run = self.assert_terminal(app, ObserverModel(), snapshots)
@@ -90,6 +96,7 @@ class FailureBoundaryTests(unittest.TestCase):
                 app = StartAgentRun(
                     "http://127.0.0.1:1",
                     self.catalog,
+                    token_counter=count_test_tokens,
                     secrets=["CANARY"],
                     trace_sink=snapshots.append,
                     limits=Limits(malformed_retries=0),
@@ -107,7 +114,10 @@ class FailureBoundaryTests(unittest.TestCase):
         port, thread = serve_raw([(header + body, 0)])
         snapshots = []
         app = StartAgentRun(
-            f"http://127.0.0.1:{port}", self.catalog, trace_sink=snapshots.append
+            f"http://127.0.0.1:{port}",
+            self.catalog,
+            token_counter=count_test_tokens,
+            trace_sink=snapshots.append,
         )
         run = self.assert_terminal(app, ObserverModel(), snapshots)
         thread.join(3)
@@ -121,6 +131,7 @@ class FailureBoundaryTests(unittest.TestCase):
         app = StartAgentRun(
             "http://127.0.0.1:1",
             self.catalog,
+            token_counter=count_test_tokens,
             trace_sink=snapshots.append,
             limits=Limits(max_seconds=0.06),
         )
@@ -143,6 +154,7 @@ class FailureBoundaryTests(unittest.TestCase):
         app = StartAgentRun(
             "http://127.0.0.1:1",
             self.catalog,
+            token_counter=count_test_tokens,
             trace_sink=snapshots.append,
             secrets=["CANARY"],
         )
@@ -167,6 +179,7 @@ class FailureBoundaryTests(unittest.TestCase):
         app = StartAgentRun(
             "http://127.0.0.1:1",
             self.catalog,
+            token_counter=count_test_tokens,
             trace_sink=snapshots.append,
             secrets=["CANARY"],
         )
@@ -184,6 +197,7 @@ class FailureBoundaryTests(unittest.TestCase):
         app = StartAgentRun(
             f"http://127.0.0.1:{port}",
             self.catalog,
+            token_counter=count_test_tokens,
             secrets=["CANARY"],
             trace_sink=snapshots.append,
         )
@@ -209,6 +223,7 @@ class FailureBoundaryTests(unittest.TestCase):
         app = StartAgentRun(
             "http://127.0.0.1:1",
             self.catalog,
+            token_counter=count_test_tokens,
             trace_sink=snapshots.append,
             limits=Limits(max_seconds=2),
         )
@@ -226,6 +241,7 @@ class FailureBoundaryTests(unittest.TestCase):
         app = StartAgentRun(
             "http://127.0.0.1:1",
             self.catalog,
+            token_counter=count_test_tokens,
             trace_sink=snapshots.append,
             secrets=["CANARY"],
         )

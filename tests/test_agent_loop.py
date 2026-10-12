@@ -16,6 +16,9 @@ from api_agent.openapi import parse_document
 from agent_support import ObserverModel, reply
 
 
+from agent_support import count_test_tokens
+
+
 class AgentLoopTests(unittest.TestCase):
     def setUp(self):
         # Отсутствие нового use case даёт явную красную фазу до реализации.
@@ -29,14 +32,18 @@ class AgentLoopTests(unittest.TestCase):
         self.addCleanup(self.demo.__exit__, None, None, None)
 
     def app(self, **kwargs):
-        return self.StartAgentRun(self.demo.target, self.catalog, **kwargs)
+        return self.StartAgentRun(
+            self.demo.target, self.catalog, token_counter=count_test_tokens, **kwargs
+        )
 
     def test_observation_changes_next_action_with_same_goal(self):
         traces = []
         for mode in ("good", "invalid_json"):
             self.demo.reset()
             self.demo.mode = mode
-            run = self.app().start("p", "s", "m", "Check pet", ObserverModel())
+            run = self.app().start(
+                "p", "s", "m", "Check pet", ObserverModel(), checks_only=True
+            )
             traces.append([step["action"]["name"] for step in run["steps"]])
             self.assertEqual(len(self.demo.journal), 1)
             self.assertEqual(run["requests"], 1)
@@ -50,8 +57,10 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_duplicate_message_returns_existing_run_without_http(self):
         app = self.app()
-        run = app.start("p", "s", "m", "Check pet", ObserverModel())
-        again = app.start("p", "s", "m", "Changed goal", ObserverModel())
+        run = app.start("p", "s", "m", "Check pet", ObserverModel(), checks_only=True)
+        again = app.start(
+            "p", "s", "m", "Changed goal", ObserverModel(), checks_only=True
+        )
         self.assertEqual(run, again)
         self.assertEqual(len(self.demo.journal), 1)
         self.assertEqual(run["goal"], "Check pet")
@@ -63,7 +72,7 @@ class AgentLoopTests(unittest.TestCase):
             snapshots.append((json.loads(json.dumps(run)), len(self.demo.journal)))
 
         run = self.app(trace_sink=sink).start(
-            "p", "s", "m", "Check pet", ObserverModel()
+            "p", "s", "m", "Check pet", ObserverModel(), checks_only=True
         )
         before = [r for r, n in snapshots if n == 0 and r["expectations"]]
         self.assertTrue(before)
@@ -73,13 +82,13 @@ class AgentLoopTests(unittest.TestCase):
 
     def test_repeated_inspection_stops_without_network(self):
         model = lambda p: reply("inspect_operation", {"operation_id": "getPet"})
-        run = self.app().start("p", "s", "m", "Check pet", model)
+        run = self.app().start("p", "s", "m", "Check pet", model, checks_only=True)
         self.assertEqual(run["stop_reason"], "no_progress")
         self.assertEqual(self.demo.connections, 0)
 
     def test_request_limit_stops_second_execution(self):
         model = lambda p: reply("execute_operation", {"operation_id": "getPet"})
-        run = self.app().start("p", "s", "m", "Check pet", model)
+        run = self.app().start("p", "s", "m", "Check pet", model, checks_only=True)
         self.assertEqual(run["stop_reason"], "request_limit")
         self.assertEqual(len(self.demo.journal), 1)
 
@@ -91,7 +100,12 @@ class AgentLoopTests(unittest.TestCase):
         ]:
             with self.subTest(name=name, args=args):
                 run = self.app().start(
-                    "p", "s", "m", "Check pet", lambda p: reply(name, args)
+                    "p",
+                    "s",
+                    "m",
+                    "Check pet",
+                    lambda p: reply(name, args),
+                    checks_only=True,
                 )
                 self.assertEqual(run["stop_reason"], "malformed_limit")
                 self.assertEqual(self.demo.connections, 0)
@@ -107,9 +121,10 @@ class AgentLoopTests(unittest.TestCase):
                 return {"choices": []}
             return good(payload)
 
-        run = self.app().start("p", "s", "m", "Check pet", model)
+        run = self.app().start("p", "s", "m", "Check pet", model, checks_only=True)
         self.assertEqual(run["status"], "completed")
-        self.assertEqual(run["malformed_calls"], 1)
+        self.assertEqual(run["malformed_calls"], 0)
+        self.assertEqual(run["empty_steps"], 1)
 
     def test_cancel_and_time_after_decision_prevent_http(self):
         for reason in ("cancelled", "time_limit"):
@@ -124,14 +139,14 @@ class AgentLoopTests(unittest.TestCase):
                 return reply("execute_operation", {"operation_id": "getPet"})
 
             run = self.app(clock=lambda: now[0]).start(
-                "p", "s", "m", "Check pet", model, cancel=event
+                "p", "s", "m", "Check pet", model, checks_only=True, cancel=event
             )
             self.assertEqual(run["stop_reason"], reason)
             self.assertEqual(self.demo.connections, 0)
 
     def test_step_limit_prevents_next_model_call(self):
         run = self.app(limits=self.Limits(max_steps=1)).start(
-            "p", "s", "m", "Check pet", ObserverModel()
+            "p", "s", "m", "Check pet", ObserverModel(), checks_only=True
         )
         self.assertEqual(run["stop_reason"], "step_limit")
         self.assertEqual(run["model_calls"], 1)
@@ -145,6 +160,7 @@ class AgentLoopTests(unittest.TestCase):
             lambda p: reply(
                 "finish_run", {"summary": "done", "evidence_ids": ["foreign"]}
             ),
+            checks_only=True,
         )
         self.assertEqual(run["stop_reason"], "malformed_limit")
         self.assertEqual(run["status"], "blocked")
@@ -160,7 +176,9 @@ class AgentLoopTests(unittest.TestCase):
                 return reply("execute_operation", {"operation_id": "getPet"})
             raise ValueError(secret)
 
-        run = self.app(secrets=(secret,)).start("p", "s", "m", "Check " + secret, model)
+        run = self.app(secrets=(secret,)).start(
+            "p", "s", "m", "Check " + secret, model, checks_only=True
+        )
         self.assertNotIn(secret, json.dumps([run, payloads]))
         self.assertEqual(run["stop_reason"], "model_error")
 
@@ -170,9 +188,9 @@ class AgentLoopTests(unittest.TestCase):
                 raise OSError("disk error")
 
         app = self.app(trace_sink=sink)
-        run = app.start("p", "s", "m", "Check pet", ObserverModel())
+        run = app.start("p", "s", "m", "Check pet", ObserverModel(), checks_only=True)
         self.assertEqual(run["stop_reason"], "trace_error")
-        app.start("p", "s", "m", "Check pet", ObserverModel())
+        app.start("p", "s", "m", "Check pet", ObserverModel(), checks_only=True)
         self.assertEqual(self.demo.connections, 0)
 
     def test_invalid_limits_and_catalog_are_rejected_before_network(self):
@@ -189,12 +207,16 @@ class AgentLoopTests(unittest.TestCase):
             {"name": "api-key", "in": "header", "schema": {"type": "string"}}
         ]
         with self.assertRaises(ValueError):
-            self.StartAgentRun(self.demo.target, parse_document(document))
+            self.StartAgentRun(
+                self.demo.target,
+                parse_document(document),
+                token_counter=count_test_tokens,
+            )
         self.assertEqual(self.demo.connections, 0)
 
     def test_prompt_budget_stops_before_model(self):
         run = self.app(limits=self.Limits(max_prompt_bytes=1)).start(
-            "p", "s", "m", "Check pet", ObserverModel()
+            "p", "s", "m", "Check pet", ObserverModel(), checks_only=True
         )
         self.assertEqual(run["stop_reason"], "prompt_limit")
         self.assertEqual(run["model_calls"], 0)
@@ -204,7 +226,9 @@ class AgentLoopTests(unittest.TestCase):
         results = []
 
         def start():
-            results.append(app.start("p", "s", "m", "Check pet", ObserverModel()))
+            results.append(
+                app.start("p", "s", "m", "Check pet", ObserverModel(), checks_only=True)
+            )
 
         threads = [threading.Thread(target=start) for _ in range(2)]
         for thread in threads:
@@ -215,7 +239,9 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(results[0], results[1])
         self.assertEqual(len(self.demo.journal), 1)
         with self.assertRaises(ValueError):
-            app.start("foreign", "s", "m", "Check pet", ObserverModel())
+            app.start(
+                "foreign", "s", "m", "Check pet", ObserverModel(), checks_only=True
+            )
 
     def test_duplicate_snapshot_isolated_and_tools_stable(self):
         payloads = []
@@ -226,12 +252,15 @@ class AgentLoopTests(unittest.TestCase):
             return observer(payload)
 
         app = self.app()
-        run = app.start("p", "s", "m", "Check pet", model)
+        run = app.start("p", "s", "m", "Check pet", model, checks_only=True)
         run["exchanges"].clear()
-        again = app.start("p", "s", "m", "Check pet", model)
+        again = app.start("p", "s", "m", "Check pet", model, checks_only=True)
         self.assertEqual(len(again["exchanges"]), 1)
         self.assertEqual(payloads[0]["tools"], payloads[1]["tools"])
-        self.assertEqual(payloads[1]["messages"][:2], payloads[0]["messages"])
+        self.assertEqual(
+            payloads[1]["messages"][: len(payloads[0]["messages"])],
+            payloads[0]["messages"],
+        )
 
     def test_cancel_during_http_prevents_following_model_call(self):
         event = threading.Event()
@@ -246,7 +275,7 @@ class AgentLoopTests(unittest.TestCase):
                 event.set()
 
         run = self.app(trace_sink=sink).start(
-            "p", "s", "m", "Check pet", model, cancel=event
+            "p", "s", "m", "Check pet", model, checks_only=True, cancel=event
         )
         self.assertEqual(run["stop_reason"], "cancelled")
         self.assertEqual(len(calls), 1)
@@ -254,11 +283,15 @@ class AgentLoopTests(unittest.TestCase):
     def test_malformed_nested_response_stops_safely(self):
         response = {"choices": []}
         response["recursive"] = response
-        run = self.app().start("p", "s", "m", "Check pet", lambda p: response)
+        run = self.app().start(
+            "p", "s", "m", "Check pet", lambda p: response, checks_only=True
+        )
         self.assertEqual(run["stop_reason"], "malformed_limit")
 
     def test_run_records_immutable_model_and_contract_configuration(self):
-        run = self.app().start("p", "s", "m", "Check pet", ObserverModel())
+        run = self.app().start(
+            "p", "s", "m", "Check pet", ObserverModel(), checks_only=True
+        )
         self.assertEqual(run["model"]["name"], "MiniCPM5-2B-Q4_K_M")
         self.assertEqual(run["model"]["sampling"]["temperature"], 0.0)
         self.assertEqual(run["contract"]["profile_version"], "rest-json-v1")

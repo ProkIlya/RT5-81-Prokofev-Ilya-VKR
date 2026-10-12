@@ -18,7 +18,7 @@ from api_agent.agent import Limits, StartAgentRun
 from api_agent.agent.model import LocalModel
 from api_agent.openapi import parse_document
 from demo_api.server import DemoServer
-from agent_support import ObserverModel, reply
+from agent_support import count_test_tokens, ObserverModel, reply
 
 
 def save(path, value):
@@ -65,6 +65,7 @@ def main(mode):
             ):
                 kwargs = {
                     "limits": limits,
+                    "token_counter": getattr(model, "count_tokens", count_test_tokens),
                     "secrets": secrets,
                     "trace_sink": lambda r: save(traces / (label + ".json"), r),
                 }

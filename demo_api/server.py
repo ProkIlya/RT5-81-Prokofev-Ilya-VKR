@@ -1,4 +1,5 @@
 """Локальный Demo API с одним GET; reset доступен только управляющему стенду."""
+
 import argparse
 import json
 import threading
@@ -7,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class DemoServer:
     """Сбрасываемый сервер и независимые наблюдения за сетевыми обращениями."""
+
     def __init__(self, port=0):
         self.journal = []
         self.reset_log = []
@@ -32,20 +34,32 @@ class DemoServer:
                 # Журнал формируется сервером независимо от trace агента.
                 owner.journal.append({"method": "GET", "path": self.path})
                 status, headers = 200, {}
+                content_type = "application/json"
                 body = json.dumps(owner.pet).encode()
                 if self.path != "/pets/1":
                     status, body = 404, b'{"error":"not_found"}'
                 elif owner.mode == "redirect":
                     # Дефектные режимы включает стенд, а не инструмент модели.
-                    status, body = 302, b'{}'
+                    status, body = 302, b"{}"
                     headers["Location"] = owner.redirect_target
                 elif owner.mode == "oversize":
-                    body = b'x' * 65537
+                    body = b"x" * 65537
+                elif owner.mode == "not_found":
+                    status, body = 404, b'{"error":"not_found"}'
+                elif owner.mode == "schema_mismatch":
+                    body = b'{"id":"wrong","name":"Murka"}'
+                elif owner.mode == "missing_required":
+                    body = b'{"id":1}'
+                elif owner.mode == "invalid_content_type":
+                    content_type = "text/plain"
                 elif owner.mode == "invalid_json":
-                    body = b'not-json'
+                    body = b"not-json"
                 self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Type", content_type)
+                self.send_header(
+                    "Content-Length",
+                    str(len(body) + (10 if owner.mode == "incomplete_response" else 0)),
+                )
                 for name, value in headers.items():
                     self.send_header(name, value)
                 self.end_headers()
@@ -69,8 +83,11 @@ class DemoServer:
         self.reset_log.append({"result": "reset", "state": dict(self.pet)})
 
     def __enter__(self):
-        self.thread = threading.Thread(target=self.server.serve_forever,
-                                       kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            kwargs={"poll_interval": 0.05},
+            daemon=True,
+        )
         self.thread.start()
         return self
 

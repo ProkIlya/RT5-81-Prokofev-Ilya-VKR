@@ -169,6 +169,14 @@ def main(mode):
                         ),
                         case["name"] + "_context",
                     )
+                    require(
+                        any(
+                            "budget_warning:" + warning in m["content"]
+                            for payload in payloads
+                            for m in payload["messages"]
+                        ),
+                        case["name"] + "_delivered_to_model",
+                    )
                 require(
                     app.start(
                         "gate-project", "gate-session", case["name"], "changed", model

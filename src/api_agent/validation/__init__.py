@@ -30,6 +30,18 @@ def fingerprint(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def display_value(value):
+    """Ограничить диагностическое значение, сохранив сравнение на полном JSON.
+
+    Большие значения не пересказываются и не получают сырого префикса:
+    это сохраняет предел отчёта и не обходит последующее маскирование.
+    """
+    size = len(canonical(value))
+    if size > 1024:
+        return {"omitted": True, "bytes_total": size}
+    return deepcopy(value)
+
+
 def prepare_expectations(catalog, conditions, message_id, goal):
     """Зафиксировать условия доверенной команды до HTTP.
 
@@ -354,6 +366,7 @@ def validate_exchange(catalog, exchange, expectations):
             expectation["source"],
         )
         observed = None
+        details = {}
         if complete:
             if predicate == "status_in":
                 observed = response["status"] in params["values"]
@@ -385,8 +398,20 @@ def validate_exchange(catalog, exchange, expectations):
                     observed = response.get(
                         "json_valid", outcome == "received"
                     ) and canonical(actual) == canonical(params["value"])
+                    details = {
+                        "path": params["path"],
+                        "expected": display_value(params["value"]),
+                        "actual": display_value(actual),
+                        "actual_present": True,
+                    }
                 except (KeyError, IndexError, TypeError):
                     observed = False
+                    details = {
+                        "path": params["path"],
+                        "expected": display_value(params["value"]),
+                        "actual": None,
+                        "actual_present": False,
+                    }
         if (
             predicate
             in {
@@ -416,6 +441,7 @@ def validate_exchange(catalog, exchange, expectations):
                 "verdict": verdict,
                 "comparison": observed,
                 "basis": deepcopy(expectation["basis"]),
+                **details,
             }
         )
     verdicts = {check["verdict"] for check in checks}
@@ -428,6 +454,15 @@ def validate_exchange(catalog, exchange, expectations):
         "pass",
     )
     confirmed = len(issues) if complete and intent != "setup_error" else 0
+    issues_total = len(issues)
+    # Вердикт и счётчик учитывают все нарушения; отображение имеет отдельный предел.
+    displayed_issues = [
+        {
+            k: display_value(v) if k in {"actual", "expected"} else v
+            for k, v in issue.items()
+        }
+        for issue in issues[:128]
+    ]
     return {
         "schema_version": 1,
         "exchange_id": exchange["id"],
@@ -440,7 +475,9 @@ def validate_exchange(catalog, exchange, expectations):
         "contract_verdict": contract,
         "intent_verdict": intent,
         "checks": checks,
-        "issues": issues,
+        "issues": displayed_issues,
+        "issues_total": issues_total,
+        "issue_details_truncated": issues_total > len(displayed_issues),
         "confirmed_contract_violations": confirmed,
         "task_postcondition": complete and bool(checks) and intent in {"pass", "fail"},
         "completion_scope": "supported_checks_only",
@@ -552,6 +589,9 @@ def report(run):
         "contract_verdict": result.get("contract_verdict", "not_checked"),
         "intent_verdict": result.get("intent_verdict", "not_checked"),
         "issues": report_issues,
+        "issues_total": result.get("issues_total", len(report_issues)),
+        "issue_details_truncated": result.get("issue_details_truncated", False),
+        "intent_results": deepcopy(result.get("checks", [])),
         "unverified": unverified,
         "confirmed_contract_violations": result.get("confirmed_contract_violations", 0),
         "diagnostic": diagnostic,

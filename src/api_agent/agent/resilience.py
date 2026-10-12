@@ -179,6 +179,16 @@ class TokenBudget:
         self.calls += 1
         return count, reserve
 
+    def release_unsent(self, reserved):
+        """Освободить только неотправленный резерв для пересборки окна.
+
+        Уже выполненные генерации остаются в cumulative budget. Этот метод
+        вызывается до model_requested, никогда после отправки payload.
+        """
+        self.upper -= reserved
+        self.calls -= 1
+        self.pending = False
+
     def settle(self, usage, max_output):
         if not usage:
             self.pending = False

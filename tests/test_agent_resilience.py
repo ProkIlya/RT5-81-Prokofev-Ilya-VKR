@@ -172,6 +172,12 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(run["stop_reason"], "token_limit")
         self.assertIn("tokens", run["warnings"])
         self.assertTrue(
+            any(
+                "budget_warning:tokens" in m["content"]
+                for m in payloads[-1]["messages"]
+            )
+        )
+        self.assertTrue(
             any("budget_warning:tokens" in m["content"] for m in run["history"])
         )
         self.assertEqual(journal, [])
@@ -238,3 +244,26 @@ class ResilienceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LastGenerationWarningTests(unittest.TestCase):
+    def test_single_step_budget_warns_in_last_permitted_payload(self):
+        payloads = []
+        normal = MeteredModel()
+
+        def model(payload):
+            payloads.append(payload)
+            return normal(payload)
+
+        with DemoServer() as demo:
+            run = StartAgentRun(
+                demo.target,
+                catalog(),
+                token_counter=count_tokens,
+                limits=Limits(max_steps=1),
+            ).start("p", "s", "m", "Check pet", model)
+        self.assertEqual(run["stop_reason"], "step_limit")
+        self.assertEqual(len(payloads), 1)
+        self.assertTrue(
+            any("budget_warning:steps" in m["content"] for m in payloads[0]["messages"])
+        )

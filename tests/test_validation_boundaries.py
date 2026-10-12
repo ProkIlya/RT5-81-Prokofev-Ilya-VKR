@@ -197,3 +197,56 @@ class StrictJsonTests(unittest.TestCase):
         self.assertEqual(run["exchanges"][0]["outcome"], "invalid_json")
         self.assertEqual(run["validation"]["contract_verdict"], "mismatch")
         self.assertTrue(any(i["code"] == "json" for i in run["validation"]["issues"]))
+
+
+class ReportDetailTests(unittest.TestCase):
+    def test_user_value_mismatch_reports_expected_actual_and_path(self):
+        from demo_api.server import DemoServer
+
+        condition = {
+            "source": "USER_DEFINED",
+            "predicate": "json_value_equals",
+            "parameters": {"path": "/name", "value": "Milk"},
+            "intent": "positive",
+            "basis": {"message_id": "m"},
+            "preconditions": "verified",
+        }
+        with DemoServer() as demo:
+            run = StartAgentRun(
+                demo.target, catalog(), token_counter=count_test_tokens
+            ).start("p", "s", "m", "Check pet", ObserverModel(), conditions=[condition])
+        checks = run["report"].get("intent_results", [])
+        self.assertTrue(
+            any(
+                c.get("path") == "/name"
+                and c.get("expected") == "Milk"
+                and c.get("actual") == "Murka"
+                for c in checks
+            )
+        )
+        self.assertEqual(run["validation"]["confirmed_contract_violations"], 0)
+
+    def test_many_schema_errors_keep_terminal_run_and_bounded_report(self):
+        from demo_api.server import DemoServer
+        from api_agent.openapi import parse_document
+
+        doc = json.loads((ROOT / "tests/fixtures/demo_openapi.json").read_text())
+        fields = {f"field_{i}": {"type": "string"} for i in range(4000)}
+        doc["paths"]["/pets/1"]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"] = {"type": "object", "properties": fields, "required": list(fields)}
+        cat = parse_document(doc)
+        with DemoServer() as demo:
+            demo.pet = {}
+            snapshots = []
+            run = StartAgentRun(
+                demo.target,
+                cat,
+                token_counter=count_test_tokens,
+                trace_sink=snapshots.append,
+            ).start("p", "s", "m", "Check pet", ObserverModel())
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["validation"]["issues_total"], 4000)
+        self.assertLessEqual(len(run["validation"]["issues"]), 128)
+        self.assertTrue(run["validation"]["issue_details_truncated"])
+        self.assertEqual(snapshots[-1], run)

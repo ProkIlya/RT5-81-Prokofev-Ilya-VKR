@@ -503,9 +503,9 @@ class StartAgentRun:
         def emit(kind, details=None):
             return self._emit(run, kind, details or {})
 
-        def warn():
+        def warn(*, projected=False):
             values = {
-                "steps": run["model_calls"] / self.limits.max_steps,
+                "steps": (run["model_calls"] + int(projected)) / self.limits.max_steps,
                 "time": (self.clock() - started) / self.limits.max_seconds,
                 "tokens": budget.upper / self.limits.max_tokens_total,
             }
@@ -553,6 +553,27 @@ class StartAgentRun:
                     stop(error.code)
                 break
             run["resources"] = budget.snapshot()
+            # Предупреждать по резервируемой верхней границе до generation:
+            # иначе на 80% следующий вызов уже может не поместиться, и модель
+            # никогда не увидит предупреждение, сохранённое лишь в истории.
+            history_size = len(history)
+            if not guard() or not warn(projected=True):
+                break
+            if len(history) != history_size:
+                budget.release_unsent(reserved)
+                run["resources"] = budget.snapshot()
+                payload["messages"] = build_window(history)
+                prompt_bytes = len(canonical(payload))
+                if prompt_bytes > self.limits.max_prompt_bytes:
+                    stop("prompt_limit")
+                    break
+                try:
+                    input_tokens, reserved = budget.reserve(payload)
+                except BudgetViolation as error:
+                    if guard():
+                        stop(error.code)
+                    break
+                run["resources"] = budget.snapshot()
             if not guard():
                 break
             run["model_calls"] += 1

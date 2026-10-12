@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT), str(ROOT / "tests")]
 from api_agent.agent import StartAgentRun
 from api_agent.openapi import parse_document
+from api_agent.validation import validate_exchange
 from agent_support import count_test_tokens, ObserverModel, reply
 from demo_api.server import DemoServer
 
@@ -37,6 +38,8 @@ def main(mode):
             for case in fixture[mode]:
                 demo.reset()
                 demo.mode = case["mode"]
+                if "pet" in case:
+                    demo.pet = case["pet"]
                 app = StartAgentRun(
                     demo.target,
                     catalog,
@@ -68,13 +71,25 @@ def main(mode):
                         )
                     return observer(payload)
 
-                boundary = (
-                    patch(
+                def validator_fault(*args):
+                    # Изолированный отказ компонента: production-модель не
+                    # может изменять объект validator. Условие gate обязано
+                    # обнаружить присоединение чужой версии основания.
+                    result = validate_exchange(*args)
+                    result[case["validator_field"]] = "foreign"
+                    return result
+
+                if case.get("fault") == "missing_validator":
+                    boundary = patch(
                         "api_agent.agent.runtime.validate_exchange", return_value=None
                     )
-                    if case.get("fault") == "missing_validator"
-                    else nullcontext()
-                )
+                elif case.get("fault") == "validator_binding":
+                    boundary = patch(
+                        "api_agent.agent.runtime.validate_exchange",
+                        side_effect=validator_fault,
+                    )
+                else:
+                    boundary = nullcontext()
                 with boundary:
                     run = app.start(
                         "gate-project",
@@ -93,6 +108,13 @@ def main(mode):
                     }
                 )
                 require(run["status"] == case["status"], case["name"])
+                if "reason" in case:
+                    require(run["stop_reason"] == case["reason"], case["name"])
+                if case.get("fault") == "validator_binding":
+                    require(
+                        run["validation"] is None and run["final"] is None, case["name"]
+                    )
+                    require(run["model_calls"] == 1, case["name"])
                 if "contract" in case:
                     require(
                         run["validation"]["contract_verdict"] == case["contract"],

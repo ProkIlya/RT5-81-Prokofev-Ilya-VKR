@@ -128,6 +128,14 @@ def prepare_expectations(catalog, conditions, message_id, goal):
                 params["schema_pointer"], str
             ):
                 raise ValueError("invalid_schema_condition")
+            # Predicate сравнивает весь JSON ответа. Вложенная декларация
+            # поля не обосновывает это сравнение; отдельного data path в S05 нет.
+            response_roots = {
+                "/responses/" + status + "/content/application~1json/schema"
+                for status in catalog.operations["getPet"]["responses"]
+            }
+            if params["schema_pointer"] not in response_roots:
+                raise ValueError("unsupported_schema_projection")
             schema = catalog.resolve_basis("getPet", params["schema_pointer"], op_hash)
             if not isinstance(schema, dict) or "type" not in schema:
                 raise ValueError("invalid_schema_basis")
@@ -227,7 +235,9 @@ def schema_issues(value, schema, path="", schema_path=""):
         "array": isinstance(value, list),
         "string": isinstance(value, str),
         "integer": type(value) is int,
-        "number": type(value) in (int, float) and math.isfinite(value),
+        # JSON integer конечен в пределах bounded_json; перевод в float
+        # здесь недопустим: корректное большое целое вызовет OverflowError.
+        "number": type(value) is int or (type(value) is float and math.isfinite(value)),
         "boolean": type(value) is bool,
     }
 
@@ -539,6 +549,7 @@ def report(run):
         "journal_error": "storage",
         "runtime_error": "application",
         "invalid_expectation": "validation",
+        "validation_binding_error": "validation",
         "clarification_required": "validation",
         "token_preflight_error": "tokenizer",
         "token_accounting_error": "tokenizer",

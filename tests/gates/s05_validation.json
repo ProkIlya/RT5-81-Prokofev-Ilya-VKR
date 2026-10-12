@@ -110,6 +110,28 @@
       "intent": "fail",
       "status": "completed",
       "confirmed": 0
+    },
+    {
+      "name": "large_integer_309",
+      "mode": "good",
+      "pet": {
+        "id": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,
+        "name": "Murka"
+      },
+      "contract": "pass",
+      "intent": "pass",
+      "status": "completed"
+    },
+    {
+      "name": "large_integer_400",
+      "mode": "good",
+      "pet": {
+        "id": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,
+        "name": "Murka"
+      },
+      "contract": "pass",
+      "intent": "pass",
+      "status": "completed"
     }
   ],
   "bad": [
@@ -226,6 +248,117 @@
       "intent": "not_checked",
       "status": "partial",
       "confirmed": 0
+    },
+    {
+      "name": "nested_schema_contract",
+      "mode": "good",
+      "condition": {
+        "source": "CONTRACT",
+        "predicate": "supported_schema_types",
+        "parameters": {
+          "schema_pointer": "/responses/200/content/application~1json/schema/properties/id"
+        },
+        "intent": "positive",
+        "preconditions": "verified",
+        "basis": {
+          "pointer": "/responses/200/content/application~1json/schema/properties/id",
+          "spec_hash": "$CURRENT",
+          "operation_hash": "$CURRENT"
+        }
+      },
+      "status": "blocked",
+      "reason": "invalid_expectation",
+      "requests": 0
+    },
+    {
+      "name": "nested_schema_user_defined",
+      "mode": "good",
+      "condition": {
+        "source": "USER_DEFINED",
+        "predicate": "supported_schema_types",
+        "parameters": {
+          "schema_pointer": "/responses/200/content/application~1json/schema/properties/id"
+        },
+        "intent": "positive",
+        "preconditions": "verified",
+        "basis": {
+          "message_id": "nested_schema_user_defined"
+        }
+      },
+      "status": "blocked",
+      "reason": "invalid_expectation",
+      "requests": 0
+    },
+    {
+      "name": "nested_schema_model_hypothesis",
+      "mode": "good",
+      "condition": {
+        "source": "MODEL_HYPOTHESIS",
+        "predicate": "supported_schema_types",
+        "parameters": {
+          "schema_pointer": "/responses/200/content/application~1json/schema/properties/id"
+        },
+        "intent": "positive",
+        "preconditions": "verified",
+        "basis": null
+      },
+      "status": "blocked",
+      "reason": "invalid_expectation",
+      "requests": 0
+    },
+    {
+      "name": "foreign_validator_spec_hash",
+      "mode": "good",
+      "fault": "validator_binding",
+      "validator_field": "spec_hash",
+      "status": "failed",
+      "reason": "validation_binding_error",
+      "requests": 1
+    },
+    {
+      "name": "foreign_validator_operation_hash",
+      "mode": "good",
+      "fault": "validator_binding",
+      "validator_field": "operation_hash",
+      "status": "failed",
+      "reason": "validation_binding_error",
+      "requests": 1
+    },
+    {
+      "name": "foreign_validator_expectations_hash",
+      "mode": "good",
+      "fault": "validator_binding",
+      "validator_field": "expectations_hash",
+      "status": "failed",
+      "reason": "validation_binding_error",
+      "requests": 1
+    },
+    {
+      "name": "foreign_validator_operation_id",
+      "mode": "good",
+      "fault": "validator_binding",
+      "validator_field": "operation_id",
+      "status": "failed",
+      "reason": "validation_binding_error",
+      "requests": 1
+    },
+    {
+      "name": "foreign_validator_exchange_id",
+      "mode": "good",
+      "fault": "validator_binding",
+      "validator_field": "exchange_id",
+      "status": "failed",
+      "reason": "validation_binding_error",
+      "requests": 1
+    },
+    {
+      "name": "foreign_validator_run_id",
+      "mode": "good",
+      "fault": "validator_binding",
+      "validator_field": "run_id",
+      "status": "failed",
+      "reason": "validation_binding_error",
+      "requests": 1
     }
   ]
 }

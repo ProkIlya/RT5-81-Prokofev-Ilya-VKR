@@ -119,6 +119,50 @@ def post_stream(payload):
 
 
 def main():
+    if (
+        len(sys.argv) == 3
+        and sys.argv[1] in ("S06", "S06a", "S06b")
+        and sys.argv[2] in ("good", "bad")
+    ):
+        from scripts.check_runtime_chain import main as chain_main
+
+        mode = sys.argv[2]
+        if sys.argv[1] != "S06":
+            return chain_main(sys.argv[1][-1], mode)
+        expected = 0 if mode == "good" else 2
+        a = chain_main("a", mode)
+        b = chain_main("b", mode) if a == expected else None
+        code = expected if a == b == expected else 1
+        root = Path(os.environ.get("S06_EVIDENCE_DIR", ROOT / "evidence/S06"))
+        manifest = root / ("parent-" + mode + "-" + str(time.time_ns()) + ".json")
+        sources = (
+            sorted((ROOT / "src/api_agent").rglob("*.py"))
+            + sorted((ROOT / "demo_api").rglob("*.py"))
+            + sorted((ROOT / "scripts").glob("check_*.py"))
+            + sorted((ROOT / "tests").rglob("*.py"))
+            + sorted((ROOT / "tests/fixtures").glob("*.json"))
+        )
+        manifest.write_text(
+            json.dumps(
+                {
+                    "stage": "S06",
+                    "mode": mode,
+                    "exit_code": code,
+                    "parts": {"a": a, "b": b},
+                    "source_hashes": {
+                        str(p.relative_to(ROOT)): hashlib.sha256(
+                            p.read_bytes()
+                        ).hexdigest()
+                        for p in sources
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print("S06", mode, "exit=" + str(code), "manifest=" + str(manifest))
+        return code
+
     if len(sys.argv) == 3 and sys.argv[1] == "S05" and sys.argv[2] in ("good", "bad"):
         from scripts.check_deterministic_validation import main as validation_main
 

@@ -1,8 +1,14 @@
-"""Локальный Demo API с одним GET; reset доступен только управляющему стенду."""
+"""Сбрасываемый локальный Demo API: питомец, заявки и Bearer login/profile.
+
+Режимы и reset задаёт владелец стенда, а не инструмент тестирующей модели.
+Журнал не сохраняет тела credentials или значения Authorization.
+"""
 
 import argparse
 import json
 import threading
+import secrets
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -15,6 +21,10 @@ class DemoServer:
         self.mode = "good"
         self.redirect_target = ""
         self.pet = {"id": 1, "name": "Murka"}
+        self.auth_token = secrets.token_urlsafe(32)
+        self.user_id = secrets.randbelow(1000000000) + 1000000
+        self.orders = {}
+        self._data_lock = threading.Lock()
         self.connections = 0
         owner = self
 
@@ -30,7 +40,105 @@ class DemoServer:
             def log_message(self, *args):
                 pass
 
+            def send_json(self, status, data):
+                body = json.dumps(data).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (ConnectionError, OSError):
+                    pass
+
+            def do_POST(self):
+                if self.path == "/users/login":
+                    try:
+                        length = int(self.headers.get("Content-Length", "0"))
+                        if not 1 <= length <= 2048:
+                            raise ValueError()
+                        data = json.loads(self.rfile.read(length))
+                        valid = data == {
+                            "login": "fixture",
+                            "password": "fixture-password",
+                        }
+                    except (ValueError, TypeError):
+                        valid = False
+                    owner.journal.append({"method": "POST", "path": self.path})
+                    if not valid:
+                        self.send_json(401, {"error": "unauthorized"})
+                        return
+                    token = (
+                        [owner.auth_token]
+                        if owner.mode == "invalid_token_type"
+                        else owner.auth_token
+                    )
+                    self.send_json(200, {"id": owner.user_id, "token": token})
+                    return
+                # Изменяющий fixture изолирован в Demo; ID выдаёт сервер.
+                if self.path != "/orders":
+                    self.send_json(404, {"error": "not_found"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 1 <= length <= 2048:
+                        raise ValueError()
+                    data = json.loads(self.rfile.read(length))
+                    if set(data) != {"name"} or data["name"] not in ("A", "B"):
+                        raise ValueError()
+                except (ValueError, TypeError):
+                    self.send_json(400, {"error": "invalid_body"})
+                    return
+                with owner._data_lock:
+                    identifier = secrets.randbelow(1000000000) + 1000000
+                    while identifier in owner.orders:
+                        identifier = secrets.randbelow(1000000000) + 1000000
+                    order = {"id": identifier, "name": data["name"]}
+                    owner.orders[identifier] = order
+                    owner.journal.append(
+                        {"method": "POST", "path": self.path, "created_id": identifier}
+                    )
+                if owner.mode == "timeout_after_commit":
+                    time.sleep(6)
+                self.send_json(201, order)
+
             def do_GET(self):
+                if self.path == "/users/profile":
+                    matched = (
+                        self.headers.get("Authorization")
+                        == "Bearer " + owner.auth_token
+                    )
+                    owner.journal.append(
+                        {"method": "GET", "path": self.path, "auth_matched": matched}
+                    )
+                    if not matched:
+                        self.send_json(401, {"error": "unauthorized"})
+                    else:
+                        self.send_json(
+                            200,
+                            {
+                                "id": owner.user_id
+                                + (1 if owner.mode == "state_id_mismatch" else 0),
+                                "name": "Fixture user",
+                            },
+                        )
+                    return
+                if self.path.startswith("/orders/"):
+                    owner.journal.append({"method": "GET", "path": self.path})
+                    try:
+                        identifier = int(self.path.removeprefix("/orders/"))
+                    except ValueError:
+                        identifier = -1
+                    with owner._data_lock:
+                        order = owner.orders.get(identifier)
+                    if order is None:
+                        self.send_json(404, {"error": "not_found"})
+                    else:
+                        answer = dict(order)
+                        if owner.mode == "state_id_mismatch":
+                            answer["id"] += 1
+                        self.send_json(200, answer)
+                    return
                 # Журнал формируется сервером независимо от trace агента.
                 owner.journal.append({"method": "GET", "path": self.path})
                 status, headers = 200, {}
@@ -75,6 +183,10 @@ class DemoServer:
 
     def reset(self):
         """Восстановить известные данные и обнулить наблюдения перед сценарием."""
+        with self._data_lock:
+            self.orders.clear()
+            self.auth_token = secrets.token_urlsafe(32)
+            self.user_id = secrets.randbelow(1000000000) + 1000000
         self.journal.clear()
         self.connections = 0
         self.mode = "good"

@@ -20,6 +20,11 @@ def main(argv=None, *, model=None, token_counter=None):
     """Передать команду StartAgentRun и показать безопасный итог без нового HTTP."""
     parser = argparse.ArgumentParser(description="Run restricted local API agent")
     parser.add_argument("goal")
+    parser.add_argument("--workflow", choices=("create-read", "auth-read"))
+    parser.add_argument(
+        "--credentials-file",
+        help="Локальный JSON login/password; значения не передаются в argv",
+    )
     parser.add_argument("--target", required=True)
     parser.add_argument("--spec", required=True)
     parser.add_argument("--llm-target", default="http://127.0.0.1:18081")
@@ -40,6 +45,33 @@ def main(argv=None, *, model=None, token_counter=None):
                 json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
+        from .chains import CreateRead, AuthRead
+
+        workflow = None
+        if args.workflow == "create-read":
+            workflow = CreateRead()
+        elif args.workflow == "auth-read":
+            credentials = {"login": "fixture", "password": "fixture-password"}
+            if args.credentials_file:
+                credential_path = Path(args.credentials_file)
+                if credential_path.stat().st_size > 16384:
+                    raise ValueError("credentials_file_limit")
+                credentials = json.loads(
+                    credential_path.read_text(encoding="utf-8-sig")
+                )
+                if (
+                    not isinstance(credentials, dict)
+                    or set(credentials) != {"login", "password"}
+                    or any(
+                        not isinstance(v, str) or not v for v in credentials.values()
+                    )
+                ):
+                    raise ValueError("invalid_credentials")
+            workflow = AuthRead(
+                account=credentials["login"], password=credentials["password"]
+            )
+        if args.credentials_file and args.workflow != "auth-read":
+            raise ValueError("credentials_workflow_required")
         message_id = str(uuid.uuid4())
         conditions = None
         if args.conditions:
@@ -65,13 +97,14 @@ def main(argv=None, *, model=None, token_counter=None):
         app = StartAgentRun(
             args.target,
             catalog,
+            workflow=workflow,
             trace_sink=sink,
             token_counter=token_counter,
             event_sink=JsonlJournal(directory),
         )
         run = app.start(
-            "cli-project",
-            "cli-session",
+            "cli-project-" + uuid.uuid4().hex if workflow else "cli-project",
+            "cli-session-" + uuid.uuid4().hex if workflow else "cli-session",
             message_id,
             args.goal,
             model if model is not None else LocalModel(args.llm_target),
@@ -89,6 +122,7 @@ def main(argv=None, *, model=None, token_counter=None):
                     "summary": run["report"]["summary"],
                     "contract_verdict": run["report"]["contract_verdict"],
                     "intent_verdict": run["report"]["intent_verdict"],
+                    **({"chain_verdict": run["chain_verdict"]} if workflow else {}),
                     "issues": run["report"]["issues"],
                     "issues_total": run["report"]["issues_total"],
                     "issue_details_truncated": run["report"]["issue_details_truncated"],

@@ -9,6 +9,7 @@ from copy import deepcopy
 import hashlib
 import json
 import math
+import re
 import uuid
 
 from ..bounded_json import validate_tree
@@ -42,7 +43,9 @@ def display_value(value):
     return deepcopy(value)
 
 
-def prepare_expectations(catalog, conditions, message_id, goal):
+def prepare_expectations(
+    catalog, conditions, message_id, goal, *, operation_id="getPet", expected_status=200
+):
     """Зафиксировать условия доверенной команды до HTTP.
 
     conditions передаёт application/UI, не tool модели. USER_DEFINED — явно
@@ -50,16 +53,16 @@ def prepare_expectations(catalog, conditions, message_id, goal):
     Автоматическое толкование произвольного естественного языка не заявляется.
     Неподдержанное или неоднозначное условие отклоняется до сетевого действия.
     """
-    op_hash = catalog.operation_hashes["getPet"]
+    op_hash = catalog.operation_hashes[operation_id]
     if conditions is None:
         conditions = [
             {
                 "source": "CONTRACT",
                 "predicate": "status_in",
-                "parameters": {"values": [200]},
+                "parameters": {"values": [expected_status]},
                 "intent": "positive",
                 "basis": {
-                    "pointer": "/responses/200",
+                    "pointer": f"/responses/{expected_status}",
                     "operation_hash": op_hash,
                     "spec_hash": catalog.spec_hash,
                 },
@@ -132,11 +135,13 @@ def prepare_expectations(catalog, conditions, message_id, goal):
             # поля не обосновывает это сравнение; отдельного data path в S05 нет.
             response_roots = {
                 "/responses/" + status + "/content/application~1json/schema"
-                for status in catalog.operations["getPet"]["responses"]
+                for status in catalog.operations[operation_id]["responses"]
             }
             if params["schema_pointer"] not in response_roots:
                 raise ValueError("unsupported_schema_projection")
-            schema = catalog.resolve_basis("getPet", params["schema_pointer"], op_hash)
+            schema = catalog.resolve_basis(
+                operation_id, params["schema_pointer"], op_hash
+            )
             if not isinstance(schema, dict) or "type" not in schema:
                 raise ValueError("invalid_schema_basis")
         elif params:
@@ -150,7 +155,7 @@ def prepare_expectations(catalog, conditions, message_id, goal):
                 or basis["operation_hash"] != op_hash
             ):
                 raise ValueError("invalid_basis")
-            declaration = catalog.resolve_basis("getPet", basis["pointer"], op_hash)
+            declaration = catalog.resolve_basis(operation_id, basis["pointer"], op_hash)
             pointer = basis["pointer"]
             # Наличие pointer недостаточно: декларация обязана обосновывать
             # именно это сравнение. Нельзя сослаться на 200 и ожидать 404.
@@ -201,7 +206,7 @@ def prepare_expectations(catalog, conditions, message_id, goal):
             descriptor["original_message"] = {"message_id": message_id, "text": goal}
         elif basis is not None:
             raise ValueError("hypothesis_has_no_verified_basis")
-        descriptor.update(id=str(uuid.uuid4()), operation_id="getPet")
+        descriptor.update(id=str(uuid.uuid4()), operation_id=operation_id)
         if predicate == "status_in":
             descriptor["values"] = list(params["values"])
         prepared.append(descriptor)
@@ -253,6 +258,17 @@ def schema_issues(value, schema, path="", schema_path=""):
     if not matches[base]:
         return [issue("schema_type", typ, value)]
     result = []
+    # Внутренние схемы tools могут задавать пределы. Parser OpenAPI
+    # по-прежнему отклоняет эти расширения: профиль внешнего контракта не меняется.
+    if base == "string":
+        for key, rejected in (
+            ("minLength", len(value) < schema.get("minLength", 0)),
+            ("maxLength", len(value) > schema.get("maxLength", len(value))),
+        ):
+            if rejected:
+                result.append(issue(key, schema[key], len(value)))
+        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+            result.append(issue("pattern", schema["pattern"], value))
     if "enum" in schema and not any(
         canonical(value) == canonical(v) for v in schema["enum"]
     ):
@@ -292,6 +308,12 @@ def schema_issues(value, schema, path="", schema_path=""):
                     )
                 )
     elif base == "array":
+        for key, rejected in (
+            ("minItems", len(value) < schema.get("minItems", 0)),
+            ("maxItems", len(value) > schema.get("maxItems", len(value))),
+        ):
+            if rejected:
+                result.append(issue(key, schema[key], len(value)))
         for index, item in enumerate(value):
             result.extend(
                 schema_issues(
@@ -311,11 +333,12 @@ def validate_exchange(catalog, exchange, expectations):
     тело и инфраструктурный отказ не дают права диагностировать отсутствующие
     поля. Сырые bytes и secrets не сохраняются; caller маскирует итог.
     """
+    operation_id = exchange["operation_id"]
     outcome, response = exchange["outcome"], exchange["response"]
     complete = outcome in {"received", "invalid_json", "invalid_content_type"}
     issues = []
     contract = "not_checked"
-    op = catalog.operations["getPet"]
+    op = catalog.operations[operation_id]
     schema_path = None
     if complete:
         status = response["status"]
@@ -362,7 +385,9 @@ def validate_exchange(catalog, exchange, expectations):
                         + "/content/application~1json/schema"
                     )
                     schema = catalog.resolve_basis(
-                        "getPet", schema_path, catalog.operation_hashes["getPet"]
+                        operation_id,
+                        schema_path,
+                        catalog.operation_hashes[operation_id],
                     )
                     issues.extend(
                         schema_issues(response["json"], schema, schema_path=schema_path)
@@ -395,9 +420,9 @@ def validate_exchange(catalog, exchange, expectations):
                 )
             elif predicate == "supported_schema_types":
                 schema = catalog.resolve_basis(
-                    "getPet",
+                    operation_id,
                     params["schema_pointer"],
-                    catalog.operation_hashes["getPet"],
+                    catalog.operation_hashes[operation_id],
                 )
                 observed = response.get(
                     "json_valid", outcome == "received"
@@ -479,7 +504,7 @@ def validate_exchange(catalog, exchange, expectations):
         "run_id": exchange["run_id"],
         "operation_id": exchange["operation_id"],
         "spec_hash": catalog.spec_hash,
-        "operation_hash": catalog.operation_hashes["getPet"],
+        "operation_hash": catalog.operation_hashes[operation_id],
         "expectations_hash": fingerprint(expectations),
         "complete_response": complete,
         "contract_verdict": contract,
@@ -500,7 +525,10 @@ def report(run):
     Это передаваемая сводка; автоматическое восстановление и повтор эффектов
     здесь отсутствуют. Свободная цель не объявляется полностью формализованной.
     """
-    result = run.get("validation") or {}
+    result = deepcopy(run.get("validation") or {})
+    if run.get("chain_verdict") == "fail":
+        result["intent_verdict"] = "fail"
+        result["task_postcondition"] = True
     labels = {
         "pass": "соответствует",
         "fail": "не соответствует",
@@ -570,6 +598,8 @@ def report(run):
         )
     if reason == "clarification_required":
         summary = "Нужно уточнить цель: доступны проверки ответа getPet. Задайте явные условия или выберите проверку контракта. Запрос не отправлен."
+        if "chain_verdict" in run:
+            summary = "Нужно уточнить цель: выбранный профиль поддерживает только свою короткую цепочку. Запрос не отправлен."
     elif reason == "invalid_expectation":
         summary = "Условие не поддерживается или не имеет проверенного основания. Уточните его до запроса; HTTP не отправлен."
     diagnostic = (
@@ -599,6 +629,14 @@ def report(run):
         "stop_reason": run["stop_reason"],
         "contract_verdict": result.get("contract_verdict", "not_checked"),
         "intent_verdict": result.get("intent_verdict", "not_checked"),
+        **(
+            {
+                "chain_verdict": run["chain_verdict"],
+                "chain_basis": "runtime_reference_binding",
+            }
+            if "chain_verdict" in run
+            else {}
+        ),
         "issues": report_issues,
         "issues_total": result.get("issues_total", len(report_issues)),
         "issue_details_truncated": result.get("issue_details_truncated", False),

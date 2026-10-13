@@ -104,7 +104,13 @@ class LocalModel:
         """
         data = {
             key: payload[key]
-            for key in ("messages", "tools", "tool_choice")
+            for key in (
+                "messages",
+                "tools",
+                "tool_choice",
+                "chat_template_kwargs",
+                "parallel_tool_calls",
+            )
             if key in payload
         }
         rendered = self._json_request("/apply-template", data)

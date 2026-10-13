@@ -46,11 +46,17 @@ class TokenizerTests(unittest.TestCase):
                 {"type": "function", "function": {"name": "inspect", "parameters": {}}}
             ],
             "tool_choice": "required",
+            "chat_template_kwargs": {"enable_thinking": False},
+            "parallel_tool_calls": False,
         }
         model = LocalModel("http://127.0.0.1:" + str(server.server_port))
         self.assertEqual(model.count_tokens(payload), 3)
         self.assertEqual(requests[0][0], "/apply-template")
         self.assertEqual(requests[0][1]["tools"], payload["tools"])
+        self.assertEqual(
+            requests[0][1].get("chat_template_kwargs"), payload["chat_template_kwargs"]
+        )
+        self.assertIs(requests[0][1].get("parallel_tool_calls"), False)
         self.assertEqual(
             requests[1],
             (

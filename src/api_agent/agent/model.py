@@ -9,7 +9,7 @@ import json
 import time
 from ..first_http import loopback_origin
 from ..socket_deadline import SocketDeadline
-from experiments.local_model.spike import collect_stream
+from .streaming import collect_stream
 from ..bounded_json import validate_tree, numeric_metadata
 
 
@@ -200,8 +200,8 @@ class LocalModel:
                         size += len(line)
                         if len(line) > 65536 or size > 1048576:
                             raise ModelError("model_response_limit", timing=timing())
-                        # collect_stream рекурсивно разбирает JSON. Ограничиваем
-                        # каждое событие до передачи ему недоверенного дерева.
+                        # Ограничиваем каждое событие отдельно от собранного
+                        # решения; сырые debug events не накапливаются.
                         if (
                             line.startswith(b"data: ")
                             and line.strip() != b"data: [DONE]"

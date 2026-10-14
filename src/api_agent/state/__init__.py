@@ -7,6 +7,8 @@
 
 from copy import deepcopy
 import uuid
+import json
+import hashlib
 from ..openapi.parser import pointer_get
 from ..bounded_json import validate_tree
 
@@ -20,6 +22,7 @@ class RunState:
         self.rules = deepcopy(rules)
         self._records = {}
         self._secrets = set()
+        self._public_catalog_hashes = set()
 
     def remember(self, exchange, path):
         """Извлечь только заранее разрешённый путь из ответа собственного Run."""
@@ -103,6 +106,27 @@ class RunState:
                 except (KeyError, IndexError, TypeError):
                     pass
 
+    def trust_public_catalog(self, operation):
+        """Зарегистрировать exact inspect DTO только из доверенного каталога.
+
+        Метод вызывает приложение после inspect, не модель/HTTP adapter. Hash
+        известной публичной декларации переживает JSON copies и не разрешает
+        masking exemption по одному похожему имени ключа. Изменённый DTO уже
+        не совпадает; literal credentials всё равно проходят строковую редакцию.
+        """
+        validate_tree(operation, max_bytes=8192)
+        if len(self._public_catalog_hashes) >= 32:
+            raise ValueError("public_catalog_limit")
+        self._public_catalog_hashes.add(self._catalog_hash(operation))
+
+    @staticmethod
+    def _catalog_hash(value):
+        return hashlib.sha256(
+            json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+
     def redact(self, value, *, _catalog=False):
         """Скрыть секретный путь целиком, не полагаясь на допустимый тип token.
 
@@ -116,6 +140,14 @@ class RunState:
                 value = value.replace(secret, "[REDACTED]")
             return value
         if isinstance(value, dict):
+            # Только зарегистрированный приложением exact DTO является schema.
+            # Произвольный catalog_operation в response не даёт таких полномочий.
+            registered = (
+                not _catalog
+                and bool(self._public_catalog_hashes)
+                and self._catalog_hash(value) in self._public_catalog_hashes
+            )
+            _catalog = _catalog or registered
             value = dict(value)
             # inspect_operation возвращает доверенную оболочку каталога.
             # Публичная декларация properties.token не является значением
@@ -163,7 +195,7 @@ class RunState:
                         cursor[key] = "[REDACTED]"
                 except (KeyError, IndexError, TypeError, ValueError):
                     pass
-            return {
+            redacted = {
                 self.redact(k): self.redact(
                     v,
                     _catalog=_catalog
@@ -175,6 +207,17 @@ class RunState:
                 )
                 for k, v in value.items()
             }
+            if registered:
+                # Строковые secrets маскируются и в enum. Безопасный exact DTO
+                # сохраняет schema provenance при повторной сериализации safe.
+                digest = self._catalog_hash(redacted)
+                if (
+                    digest not in self._public_catalog_hashes
+                    and len(self._public_catalog_hashes) >= 32
+                ):
+                    raise ValueError("public_catalog_limit")
+                self._public_catalog_hashes.add(digest)
+            return redacted
         if isinstance(value, list):
             return [self.redact(v, _catalog=_catalog) for v in value]
         return value
@@ -183,3 +226,4 @@ class RunState:
         """Не переносить credentials/ссылки в следующий Run application."""
         self._records.clear()
         self._secrets.clear()
+        self._public_catalog_hashes.clear()

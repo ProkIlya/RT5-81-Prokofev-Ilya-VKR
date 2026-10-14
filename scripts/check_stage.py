@@ -119,6 +119,60 @@ def post_stream(payload):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "S07" and sys.argv[2] in ("good", "bad"):
+        from scripts.check_policy import main as policy_main
+        from scripts.check_catalog import main as catalog_main
+
+        expected = 0 if sys.argv[2] == "good" else 2
+        parts = {}
+        for part, runner in (
+            ("a", policy_main),
+            ("b", policy_main),
+            ("c", catalog_main),
+            ("d", catalog_main),
+        ):
+            parts[part] = runner(part, sys.argv[2])
+            if parts[part] != expected:
+                break
+        code = expected if parts == {part: expected for part in "abcd"} else 1
+        directory = Path(os.environ.get("S07_EVIDENCE_DIR", ROOT / "evidence/S07"))
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / (
+            "parent-" + sys.argv[2] + "-" + str(time.time_ns()) + ".json"
+        )
+        path.write_text(
+            json.dumps(
+                {
+                    "stage": "S07",
+                    "mode": sys.argv[2],
+                    "parts": parts,
+                    "exit_code": code,
+                    "argv": sys.argv,
+                    "python": sys.executable,
+                    "cwd": str(Path.cwd()),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(json.dumps({"stage": "S07", "exit_code": code, "evidence": str(path)}))
+        return code
+    if (
+        len(sys.argv) == 3
+        and sys.argv[1] in ("S07c", "S07d")
+        and sys.argv[2] in ("good", "bad")
+    ):
+        from scripts.check_catalog import main as catalog_main
+
+        return catalog_main(sys.argv[1][-1], sys.argv[2])
+    if (
+        len(sys.argv) == 3
+        and sys.argv[1] in ("S07a", "S07b")
+        and sys.argv[2] in ("good", "bad")
+    ):
+        from scripts.check_policy import main as policy_main
+
+        return policy_main(sys.argv[1][-1], sys.argv[2])
     if (
         len(sys.argv) == 3
         and sys.argv[1] in ("S06", "S06a", "S06b")
@@ -182,7 +236,7 @@ def main():
         return s02_main(sys.argv[2])
     if len(sys.argv) != 3 or sys.argv[1] != "S01" or sys.argv[2] not in ("good", "bad"):
         print(
-            "usage: python scripts/check_stage.py S01|S02|S03|S04|S05 good|bad",
+            "usage: python scripts/check_stage.py S01|S02|S03|S04|S05|S06[a|b]|S07[a|b|c|d] good|bad",
             file=sys.stderr,
         )
         return 1

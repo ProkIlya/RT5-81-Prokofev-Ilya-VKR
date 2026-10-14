@@ -8,7 +8,7 @@
 
 Планируемый результат включает ограниченный профиль OpenAPI, безопасный доступ к одному разрешённому test target на Project, последовательный agent loop, детерминированную проверку ответов, историю запусков и находок, терминальный интерфейс Textual и сбрасываемый Demo API. Под «диагностикой» понимается анализ наблюдаемых HTTP- и контрактных отклонений, а не доказательство внутренней причины дефекта.
 
-**Текущее состояние:** S01–S06 реализованы и проверены; независимый повтор S06 принят 13.10.2026 (ACCEPT_S06). S06 поддерживает короткие create/read и login/authenticated read в том же ограниченном цикле. S07 не начат.
+**Состояние и документация:** [PROGRESS.md](PROGRESS.md) — текущий этап и ограничения; [docs/README.md](docs/README.md) — карта документов. Полное приложение ещё не готово.
 
 **На шаге S02** добавлены сбрасываемый Demo API и первый живой сценарий: локальная модель вызывает `execute_operation(getPet)`, программа выполняет один разрешённый `GET /pets/1`, а `finish_run` ссылается на реальный HTTP-обмен. Проверяются сетевые ограничения, время выполнения, размер и полнота ответа; запрещённые действия не отправляются. Полное приложение ещё не готово.
 
@@ -77,18 +77,18 @@ python scripts/check_stage.py S05 bad
 
 CLI сохраняет безопасный snapshot `.json` и append-only журнал `.jsonl`, показывает итог, отдельные результаты и пути ошибок. Gate сохраняет именованные части `a`/`b` в `evidence/S05/`; переопределение — `S05_EVIDENCE_DIR`. Good требует закреплённый локальный runtime и вес; bad не требует LLM и возвращает 2 при обнаружении всех намеренных нарушений, ошибка проверки — 1. Для изолированных tests tokenizer заменяется только явной test-инъекцией; production использует `/apply-template` и `/tokenize` того же загруженного GGUF.
 
-Лимиты по умолчанию: 8 шагов, один HTTP, 180 секунд, две пустые генерации подряд, одна коррекция malformed, три одинаковых действия, 12000 bytes payload, окно 2048 и общий бюджет 8192 токена. Перед generation резервируется настоящий templated input вместе с tools плюс максимум 384 output tokens; после сверяется actual usage. Unknown usage хранится явно, резерв не освобождается как нулевой расход. Предупреждения на 80% попадают в контекст; отчёт при hard stop формирует приложение без дополнительной генерации. Полная безопасная история и отдельное рабочее окно разделены; compaction не реализована.
+Лимиты обычного режима S05: 8 шагов, один HTTP, 180 секунд, две пустые генерации подряд, одна коррекция malformed, три одинаковых действия, 12000 bytes payload, окно 2048 и общий бюджет 8192 токена. Перед generation резервируется настоящий templated input вместе с tools плюс максимум 384 output tokens; после сверяется actual usage. Unknown usage хранится явно, резерв не освобождается как нулевой расход. Предупреждения на 80% попадают в контекст; отчёт при hard stop формирует приложение без дополнительной генерации. Полная безопасная история и отдельное рабочее окно разделены; compaction не реализована.
 
 Настроенные secrets маскируются в prompt, snapshot, журнале и отчёте. Отказ tokenizer/журнала/trace/validator прекращает новые действия. Частичный отчёт пригоден для передачи, но автоматическое восстановление, повтор изменяющих запросов и SQLite здесь не реализованы. Bearer-аутентификация и зависимые запросы — S06; полные policy modes — S07; UI — S12. Отдельный LLM-планировщик пока не добавлен.
 
 ## Испытательный Docker-стенд
 
-[Запуск и тестирование стенда](docs/test-stand.md): команды из проекта агента, good/bad, реальный прогон LLM и сбор evidence. Инструкция хранится локально вместе с docs/; при передаче проекта новой сессии передать её отдельно.
+[Запуск и тестирование стенда](docs/testing/test-stand.md): команды из проекта агента, good/bad, реальный прогон LLM и сбор evidence. Инструкция хранится локально вместе с docs/; при передаче проекта новой сессии передать её отдельно.
 
 
 ## S06: короткие зависимые цепочки
 
-Локальный llama-server должен работать на 127.0.0.1:18081 с закреплённой моделью и окном 2048. Только S06 использует max_tokens=512 и enable_thinking=false; параметры обычного S05 сохраняются.
+Локальный llama-server запускается на 127.0.0.1:18081 по runtime-lock (окно сервера8192). Run S06 сохраняет лимит контекста2048, max_tokens512 и enable_thinking=false; параметры обычного S05 сохраняются. Общий каталог S07 также использует резерв512.
 
 ```powershell
 $env:PYTHONPATH = 'src;.'
@@ -102,4 +102,25 @@ python scripts/check_stage.py S06 bad  # ожидается 2, доказанн�
 
 Auth Demo использует fixture/fixture-password. Для другого доверенного аккаунта передайте `--credentials-file config/credentials.json` с объектом `{"login":"...","password":"..."}`; файл храните вне Git. JWT передаёт приложение, модель видит только credential_ref. CLI печатает contract_verdict, intent_verdict, chain_verdict и пути trace/JSONL. Выполнение законченной цепочки не означает прохождение произвольной бизнес-цели: поддерживаются перечисленные короткие цели и их русские эквиваленты. Профиль и малый allowlist выбирает приложение; неизвестные цели требуют уточнения.
 
-Gates поднимают изолированный Demo автоматически; `S06_EVIDENCE_DIR` переопределяет каталог evidence. Отдельные части: `python scripts/check_stage.py S06a good|bad` и `S06b good|bad`. Документация реализации: [docs/s06-implementation.md](docs/s06-implementation.md); запуск Docker-стенда, reset и ограничения: [docs/test-stand.md](docs/test-stand.md). Полная корзина/заявка и общая policy относятся к последующим этапам.
+Gates поднимают изолированный Demo автоматически; `S06_EVIDENCE_DIR` переопределяет каталог evidence. Отдельные части: `python scripts/check_stage.py S06a good|bad` и `S06b good|bad`. Документация реализации: docs/s06-implementation.md (документ отсутствует; см. архив); запуск Docker-стенда, reset и ограничения: [docs/test-stand.md](docs/testing/test-stand.md). Полная корзина/заявка и общая policy относятся к последующим этапам.
+
+## S07: права Project и общий каталог
+
+Предварительно выполните preview, выберите конкретные operation IDs и назначьте риски A–E в локальном `config/selection.json`. Каталог сам по себе не выдаёт прав.
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m api_agent.policy preview --spec tests/fixtures/chain_openapi.json --target http://127.0.0.1:18082
+python -m api_agent.policy configure --spec tests/fixtures/chain_openapi.json --target http://127.0.0.1:18082 --mode SAFE --selection config/selection.json --output config/project.json --approve
+python -m api_agent.agent 'Создай заявку A и проверь её чтение' --target http://127.0.0.1:18082 --spec tests/fixtures/chain_openapi.json --project-config config/project.json --goal-checks config/goal-checks.json --runtime-mappings config/runtime-mappings.json --interactive-approval
+python scripts/check_stage.py S07 good # ожидается 0; настоящий llama-server
+python scripts/check_stage.py S07 bad  # ожидается 2; доказанный отказ
+```
+
+`--goal-checks` содержит объект operation_id → список доверенных scalar predicates (`predicate`, `parameters`, `intent`, `preconditions`). `--runtime-mappings` содержит правила `extraction`, `binding_rules`, `auth`, `anonymous_operations`; модель не создаёт эти правила. Для общего каталога credentials задаются в приватном `auth.body` файла `--runtime-mappings`; `--credentials-file` применяется к пилотному `--workflow auth-read`. Неподдержанные схемы/критерии отклоняются; общий исполнитель ещё не является автоматическим oracle для произвольной бизнес-цели.
+
+SAFE требует подтверждения точного действия перед HTTP; READ_ONLY запрещает изменения; TEST разрешает предусмотренные policy изменения только на resettable target. Риски D/E требуют подтверждения. Approval привязан к Run/config/action hash; отмена, отказ, просрочка и изменение конфигурации прекращают действие. Исходные права Run не расширяются: новая операция требует нового Run. Неопределённый исход изменяющего запроса не повторяется автоматически.
+
+Общий каталог использует окно 8192, резерв ответа 512 и прежний суммарный бюджет 8192 токенов. Сервер запускайте с `-c 8192` по `experiments/local_model/runtime-lock.json`; S05/S06 сохраняют свои меньшие Run limits. Размер окна не гарантирует поддержку любой длины задачи. В prompt входят ограниченные карточки; остальные разрешённые операции доступны через scoped search/inspect. Параметры и тело проверяются программой; защищённые headers задаёт приложение.
+
+Архитектура и результаты: локальные `docs/reports/S07/design-and-interview.md`, `docs/reports/S07/implementation.md`, `PROGRESS.md`. Эти документы и evidence передаются отдельно от Git.

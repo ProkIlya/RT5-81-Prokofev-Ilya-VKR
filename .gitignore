@@ -20,8 +20,8 @@ config.*
 # Local model weights, runtime output, and test evidence.
 *.gguf
 models/
+experiments/
 evidence/
-experiments/local_model/runtime/
 *.sqlite
 *.sqlite3
 *.db

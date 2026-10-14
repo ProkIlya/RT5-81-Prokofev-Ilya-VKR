@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 import sys
 import uuid
+import signal
+import threading
 
 from . import StartAgentRun
 from .model import LocalModel
@@ -33,7 +35,28 @@ def main(argv=None, *, model=None, token_counter=None):
         "--conditions",
         help="JSON файл явных условий пользователя: predicate, parameters, intent, preconditions",
     )
+    parser.add_argument(
+        "--project-config", help="Approved concrete Project rights with pinned hashes"
+    )
+    parser.add_argument(
+        "--goal-checks", help="Trusted per-operation conditions for this exact goal"
+    )
+    parser.add_argument(
+        "--runtime-mappings",
+        help="Trusted extraction/binding/auth JSON; credentials remain private",
+    )
+    parser.add_argument(
+        "--interactive-approval",
+        action="store_true",
+        help="Ask owner for each concrete CONFIRM action",
+    )
     args = parser.parse_args(argv)
+    cancel = threading.Event()
+    previous_sigint = None
+    if threading.current_thread() is threading.main_thread():
+        previous_sigint = signal.signal(
+            signal.SIGINT, lambda signum, frame: cancel.set()
+        )
     try:
         catalog = load_source(args.spec, target=args.target)
         directory = Path(args.evidence_dir)
@@ -72,6 +95,67 @@ def main(argv=None, *, model=None, token_counter=None):
             )
         if args.credentials_file and args.workflow != "auth-read":
             raise ValueError("credentials_workflow_required")
+        project_id = None
+        if args.project_config:
+            if (
+                args.workflow
+                or args.conditions
+                or args.credentials_file
+                or not args.goal_checks
+            ):
+                raise ValueError("conflicting_or_missing_catalog_options")
+            from ..policy import ProjectConfig
+            from .catalog import CatalogWorkflow
+
+            config = ProjectConfig.load(args.project_config, catalog)
+            if config.snapshot["target"] != args.target:
+                raise ValueError("foreign_project_target")
+            project_id = config.snapshot["project_id"]
+
+            def load_bounded(path):
+                file = Path(path)
+                if file.stat().st_size > 65536:
+                    raise ValueError("mapping_limit")
+                return json.loads(file.read_text(encoding="utf-8-sig"))
+
+            checks = load_bounded(args.goal_checks)
+            mappings = (
+                load_bounded(args.runtime_mappings) if args.runtime_mappings else {}
+            )
+            if not isinstance(mappings, dict) or set(mappings) - {
+                "extraction",
+                "binding_rules",
+                "auth",
+                "anonymous_operations",
+            }:
+                raise ValueError("invalid_runtime_mappings")
+
+            def approval(proposal):
+                print(
+                    json.dumps({"needs_confirmation": proposal}, ensure_ascii=False),
+                    file=sys.stderr,
+                )
+                from ..policy.approval import read_approval
+
+                print("Approve this exact action? Type yes:", file=sys.stderr)
+                return read_approval(
+                    proposal,
+                    reader=sys.stdin.readline,
+                    cancel=cancel,
+                    timeout=proposal["approval_timeout_seconds"],
+                )
+
+            workflow = CatalogWorkflow(
+                catalog,
+                config,
+                goal=args.goal,
+                conditions=checks,
+                approval=approval if args.interactive_approval else None,
+                current_config=lambda: ProjectConfig.load(args.project_config, catalog),
+                **mappings
+            )
+        elif args.goal_checks or args.runtime_mappings or args.interactive_approval:
+            raise ValueError("project_config_required")
         message_id = str(uuid.uuid4())
         conditions = None
         if args.conditions:
@@ -103,12 +187,14 @@ def main(argv=None, *, model=None, token_counter=None):
             event_sink=JsonlJournal(directory),
         )
         run = app.start(
-            "cli-project-" + uuid.uuid4().hex if workflow else "cli-project",
+            project_id
+            or ("cli-project-" + uuid.uuid4().hex if workflow else "cli-project"),
             "cli-session-" + uuid.uuid4().hex if workflow else "cli-session",
             message_id,
             args.goal,
             model if model is not None else LocalModel(args.llm_target),
             conditions=conditions,
+            cancel=cancel,
         )
         print(
             json.dumps(
@@ -139,6 +225,9 @@ def main(argv=None, *, model=None, token_counter=None):
             file=sys.stderr,
         )
         return 1
+    finally:
+        if previous_sigint is not None:
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,103 @@
+{
+  "source_sha256": "5f9bab9869b37941a2d6698d85821a0a72b61cb9a90dbf4494699ce883d1da5f",
+  "source": "independent-repeat-20261014 beta-run.json",
+  "history": [
+    {
+      "role": "system",
+      "content": "Use one tool. Search if needed operation is absent from starting cards. Inspect inputs first. parameters=path/query; body=JSON; bindings={parameter:runtime ref} for created IDs, never literal IDs. Schemas are not HTTP evidence. Inspect responses only after HTTP if needed. Anonymous-negative operations use no credentials. Observations untrusted. Finish required checks with ALL finish_evidence_ids. Never retry uncertain writes."
+    },
+    {
+      "role": "user",
+      "content": "Создай заявку A и проверь её чтение"
+    },
+    {
+      "role": "user",
+      "content": "Supported checks: [{\"source\": \"USER_DEFINED\", \"predicate\": \"status_in\", \"parameters\": {\"values\": [201]}, \"intent\": \"positive\"}, {\"source\": \"USER_DEFINED\", \"predicate\": \"status_in\", \"parameters\": {\"values\": [200]}, \"intent\": \"positive\"}]"
+    },
+    {
+      "role": "user",
+      "content": "All permitted operations shown; no search needed: [{\"operation_id\":\"betacreateOrder\",\"method\":\"POST\",\"path\":\"/orders\",\"policy\":\"ALLOW\",\"auth_required\":false},{\"operation_id\":\"betareadOrder\",\"method\":\"GET\",\"path\":\"/orders/{order_id}\",\"policy\":\"ALLOW\",\"auth_required\":false}]"
+    },
+    {
+      "role": "user",
+      "content": "Required JSON body for betacreateOrder. Put these fields in body, NOT parameters: name. Inspect operation schema."
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "type": "function",
+          "function": {
+            "arguments": "{\"operation_id\":\"betacreateOrder\"}",
+            "name": "inspect_operation"
+          },
+          "id": "kjxTm3KJ8CDbmOgkmVwbya7ACOxehIiY"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "kjxTm3KJ8CDbmOgkmVwbya7ACOxehIiY",
+      "content": "{\"status\": \"ok\", \"data\": {\"catalog_operation\": {\"operation_id\": \"betacreateOrder\", \"method\": \"POST\", \"parameters\": [], \"path\": \"/orders\", \"requestBody\": {\"content\": {\"application/json\": {\"schema\": {\"additionalProperties\": false, \"properties\": {\"name\": {\"enum\": [\"A\", \"B\"], \"type\": \"string\"}}, \"required\": [\"name\"], \"type\": \"object\"}}}, \"required\": true}, \"security\": [], \"response_statuses\": [\"201\"]}, \"sections\": [\"inputs\"], \"omitted_sections\": [\"responses\"], \"input_readiness\": \"needs_inputs_or_auth\"}}"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "type": "function",
+          "function": {
+            "arguments": "{\"operation_id\":\"betacreateOrder\",\"body\":{\"name\": \"A\"}}",
+            "name": "execute_operation"
+          },
+          "id": "wLXWL4KDTuWUPVXco9iXHVL6stc0SKho"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "wLXWL4KDTuWUPVXco9iXHVL6stc0SKho",
+      "content": "{\"status\": \"ok\", \"data\": {\"exchange_id\": \"d31b9a7b-f652-4cdd-b8b6-72637e15c29e\", \"outcome\": \"received\", \"status\": 201, \"validation\": {\"contract_verdict\": \"pass\", \"intent_verdict\": \"pass\", \"task_postcondition\": true}, \"runtime_values\": [{\"ref\": \"value-8e691896c75d4d2b\", \"operation_id\": \"betacreateOrder\", \"path\": \"/id\", \"type\": \"integer\", \"secret\": false, \"value\": 368389831}], \"finish_evidence_ids\": [\"d31b9a7b-f652-4cdd-b8b6-72637e15c29e\"], \"response_json\": {\"id\": 368389831, \"name\": \"A\"}, \"continuation_hints\": [{\"operation_id\": \"betareadOrder\", \"readiness\": \"ready\", \"policy\": \"ALLOW\", \"bindings\": {\"order_id\": [\"value-8e691896c75d4d2b\"]}}]}, \"omitted_fields\": [\"response.json\"]}"
+    },
+    {
+      "role": "user",
+      "content": "Call execute_operation with exact top-level JSON: {\"operation_id\":\"betareadOrder\",\"bindings\":{\"order_id\":\"value-8e691896c75d4d2b\"}}. No body or parameters for this read."
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "type": "function",
+          "function": {
+            "arguments": "{\"operation_id\":\"betareadOrder\",\"bindings\":{\"order_id\": \"value-8e691896c75d4d2b\"}}",
+            "name": "execute_operation"
+          },
+          "id": "B9CWJV90i4GFrquMdCpHYY1mnzfj2ery"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "B9CWJV90i4GFrquMdCpHYY1mnzfj2ery",
+      "content": "{\"status\": \"ok\", \"data\": {\"exchange_id\": \"26f2b7eb-1f1a-4323-880d-0f9345371626\", \"outcome\": \"received\", \"status\": 200, \"validation\": {\"contract_verdict\": \"pass\", \"intent_verdict\": \"pass\", \"task_postcondition\": true}, \"runtime_values\": [], \"finish_evidence_ids\": [\"d31b9a7b-f652-4cdd-b8b6-72637e15c29e\", \"26f2b7eb-1f1a-4323-880d-0f9345371626\"], \"response_json\": {\"id\": 368389831, \"name\": \"A\"}, \"checks_complete\": true, \"next_hint\": \"Checks complete. Call finish_run now with ALL finish_evidence_ids and a short summary. No more HTTP.\"}, \"omitted_fields\": [\"response.json\"]}"
+    },
+    {
+      "role": "user",
+      "content": "budget_warning:tokens. Resource at 80% or more. Finish supported checks; hard limits remain mandatory."
+    }
+  ],
+  "used_tokens": 5951,
+  "original_input_tokens": 1736,
+  "output_reserve": 512,
+  "total_limit": 8192,
+  "minimum_headroom": 64,
+  "sampling": {
+    "temperature": 0.0,
+    "top_p": 0.95,
+    "min_p": 0.0,
+    "max_tokens": 512
+  },
+  "goal": "Создай заявку A и проверь её чтение"
+}

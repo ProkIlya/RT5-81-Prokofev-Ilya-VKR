@@ -199,7 +199,11 @@ class StartAgentRun:
             catalog.resolve_basis("getPet", "/responses/200", self.operation_hash)
         from .chains import ChainLimits
 
-        self.limits = limits or (ChainLimits() if workflow else Limits())
+        self.limits = limits or (
+            workflow.default_limits()
+            if workflow and hasattr(workflow, "default_limits")
+            else ChainLimits() if workflow else Limits()
+        )
         self.trace_sink = trace_sink or (lambda run: None)
         # Library-вызовы сохраняют in-memory события в Run. Production CLI
         # дополнительно обязательно передаёт JsonlJournal; это не no-op sink.
@@ -245,6 +249,18 @@ class StartAgentRun:
         # Строковое маскирование после этого уже не может открыть ветвь.
         result = self._active_state.redact(value) if self._active_state else value
         return redact(result)
+
+    def _tool_content(self, result):
+        """Сначала маскировать DTO, затем применить формат профиля workflow."""
+        projected = (
+            self.workflow.model_result(result)
+            if self.workflow and hasattr(self.workflow, "model_result")
+            else result
+        )
+        public = self.safe(projected)
+        if self.workflow and hasattr(self.workflow, "model_content"):
+            return self.workflow.model_content(public)
+        return json.dumps(public, ensure_ascii=False)
 
     def start(
         self,
@@ -418,7 +434,13 @@ class StartAgentRun:
         from .chains import ChainSession
 
         session = (
-            ChainSession(self.target, self.catalog, self.workflow, run, self.limits)
+            (
+                self.workflow.make_session(self.target, self.catalog, run, self.limits)
+                if hasattr(self.workflow, "make_session")
+                else ChainSession(
+                    self.target, self.catalog, self.workflow, run, self.limits
+                )
+            )
             if self.workflow
             else Session(
                 self.target,
@@ -427,6 +449,7 @@ class StartAgentRun:
             )
         )
         session.run_id = run["run_id"]
+        session.cancel = cancel
         if self.workflow:
             self._active_state = session.state
             run["validations"] = []
@@ -489,6 +512,8 @@ class StartAgentRun:
             session._headers.clear()
             session.actions.clear()
             session.state.close()
+            if hasattr(self.workflow, "close_run"):
+                self.workflow.close_run(run["run_id"])
             self._active_state = None
         return run
 
@@ -496,8 +521,12 @@ class StartAgentRun:
         """Сначала durable sink, затем in-memory журнал; ошибка запрещает HTTP."""
         event = self.safe(event_record(run, kind, details))
         if self.workflow:
-            event["policy_version"] = "chain-test-v1"
-            event["prompt_version"] = "runtime-chain-v1"
+            event["policy_version"] = getattr(
+                self.workflow, "policy_version", "chain-test-v1"
+            )
+            event["prompt_version"] = getattr(
+                self.workflow, "prompt_version", "runtime-chain-v1"
+            )
         try:
             if self.event_sink is not None:
                 self.event_sink(deepcopy(event))
@@ -546,13 +575,29 @@ class StartAgentRun:
                             k: e[k]
                             for k in ("source", "predicate", "parameters", "intent")
                         }
-                        for e in run["expectations"]
+                        for e in (
+                            self.workflow.prompt_checks(run["expectations"])
+                            if self.workflow and hasattr(self.workflow, "prompt_checks")
+                            else run["expectations"]
+                        )
                     ],
                     ensure_ascii=False,
                 ),
             }
         )
         registry = tools(self.workflow, self.catalog)
+        if self.workflow and hasattr(self.workflow, "initial_context"):
+            history.append(
+                {
+                    "role": "user",
+                    "content": self.workflow.initial_context(
+                        run,
+                        self.token_counter or getattr(model, "count_tokens", None),
+                        history=history,
+                        redactor=self.safe,
+                    ),
+                }
+            )
         prefix_hash = fingerprint({"system": history[0], "tools": registry})
         run["history"] = history
         counter = self.token_counter or getattr(model, "count_tokens", None)
@@ -934,6 +979,17 @@ class StartAgentRun:
                     )
                     emit("tool_result", step["observation"])
                     break
+                elif (
+                    name == "search_operations"
+                    and self.workflow
+                    and hasattr(self.workflow, "discovery")
+                ):
+                    observation = self.workflow.discovery(
+                        run["run_id"], args, call=call
+                    )
+                    result = tool_result(
+                        observation, provenance={"source": "RUN_CATALOG"}
+                    )
                 elif name == "inspect_operation":
                     inspected_id = args["operation_id"]
                     operation = self.catalog.operations[inspected_id]
@@ -946,12 +1002,28 @@ class StartAgentRun:
                         }
                     }
                     if self.workflow:
-                        observation = self.workflow.inspect(self.catalog, inspected_id)
+                        observation = self.workflow.inspect(
+                            self.catalog,
+                            inspected_id,
+                            **(
+                                {"section": args.get("section", "inputs")}
+                                if hasattr(self.workflow, "inspect_sections")
+                                else {}
+                            ),
+                        )
+                    if self._active_state and "catalog_operation" in observation:
+                        # Schema пришла от workflow.inspect, а не из HTTP/model.
+                        # Регистрация exact DTO не доверяет одноимённым data keys.
+                        self._active_state.trust_public_catalog(
+                            observation["catalog_operation"]
+                        )
                     result = tool_result(
                         observation,
                         provenance={
                             "source": "CONTRACT",
-                            "operation_hash": self.operation_hash,
+                            "operation_hash": self.catalog.operation_hashes[
+                                inspected_id
+                            ],
                         },
                     )
                 else:
@@ -1079,9 +1151,7 @@ class StartAgentRun:
                         {
                             "role": "tool",
                             "tool_call_id": self.safe(call["id"]),
-                            "content": json.dumps(
-                                self.safe(result), ensure_ascii=False
-                            ),
+                            "content": self._tool_content(result),
                         },
                     ]
                 )
@@ -1116,6 +1186,12 @@ class StartAgentRun:
                 AttributeError,
                 RecursionError,
             ) as error:
+                if hasattr(error, "stop_reason"):
+                    stop(
+                        error.stop_reason,
+                        "cancelled" if error.stop_reason == "cancelled" else None,
+                    )
+                    break
                 if executing:
                     step["observation"] = tool_result(
                         error_code="invariant_violated",
@@ -1140,6 +1216,8 @@ class StartAgentRun:
                         + json.dumps([e["id"] for e in run["exchanges"]])
                         + ". Call finish_run with this exact list. Do not send another HTTP request."
                     )
+                    if not run["exchanges"]:
+                        correction = "Finish rejected: no HTTP evidence exists. Schemas alone do not prove behavior. Use execute_operation for a permitted operation before finish_run."
                 step["observation"] = tool_result(
                     error_code="validation", hint=correction
                 )

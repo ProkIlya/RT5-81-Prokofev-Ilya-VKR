@@ -71,6 +71,12 @@ class Catalog:
     """
 
     _snapshot: bytes
+    _metadata: bytes = b"{}"
+
+    @property
+    def search_metadata(self):
+        """Недоверенные bounded аннотации: вне validation basis и hashes."""
+        return json.loads(self._metadata)
 
     @property
     def snapshot(self):
@@ -453,6 +459,7 @@ class Parser:
         if not isinstance(paths, dict) or not paths:
             raise OpenApiError("invalid_operation", "/paths")
         operations = {}
+        search_metadata = {}
         templates = set()
         for path, item in paths.items():
             p = "/paths/" + pointer_part(path)
@@ -543,6 +550,9 @@ class Parser:
                         value["requestBody"], "requestBodies", op_path + "/requestBody"
                     )
                 operations[name] = normalized
+                summary = value.get("summary", "")
+                if isinstance(summary, str):
+                    search_metadata[name] = {"summary": " ".join(summary.split())[:160]}
                 if len(operations) > 128:
                     raise OpenApiError("limits", "/paths")
         return Catalog(
@@ -553,7 +563,8 @@ class Parser:
                     "openapi": self.version,
                     "operations": operations,
                 }
-            )
+            ),
+            canonical(search_metadata),
         )
 
 

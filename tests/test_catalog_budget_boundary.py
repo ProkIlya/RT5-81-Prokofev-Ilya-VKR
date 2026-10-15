@@ -60,6 +60,26 @@ class BudgetBoundaryTests(unittest.TestCase):
             self.assertEqual(new["tool_call_id"], old["tool_call_id"])
             a = json.loads(old["content"])
             b = json.loads(new["content"])
+            # Сравниваем факты независимо от явных имён новой проекции.
+            b["status"] = b.pop("tool_execution", "ok")
+            if "catalog_operation" in (a.get("data") or {}):
+                a["data"].pop("sections", None)
+                a["data"].pop("omitted_sections", None)
+            if (a.get("data") or {}).get("runtime_values") == []:
+                a["data"].pop("runtime_values")
+            if "http_response" in (b.get("data") or {}):
+                data = b["data"]
+                http = data.pop("http_response")
+                data["status"] = http["status_code"]
+                data["outcome"] = http["outcome"]
+                if "body" in http:
+                    data["response_json"] = http["body"]
+                checks = data.pop("machine_checks")
+                data["validation"] = {
+                    "contract_verdict": checks["contract_verdict"],
+                    "intent_verdict": checks["expectation_verdict"],
+                    "task_postcondition": checks["evaluation_complete"],
+                }
             # Меняется только служебная формулировка подсказки, не actual facts.
             if (a.get("data") or {}).get("checks_complete"):
                 a["data"].pop("next_hint", None)
@@ -107,7 +127,7 @@ class BudgetBoundaryTests(unittest.TestCase):
                 if payload["messages"][-1]["role"] == "tool":
                     content = payload["messages"][-1]["content"]
                     observed.append(content)
-                    self.assertIn('"status":"ok"', content)
+                    self.assertIn('"tool_execution":"ok"', content)
                     self.assertLess(
                         len(content),
                         len(json.dumps(json.loads(content), ensure_ascii=False)),

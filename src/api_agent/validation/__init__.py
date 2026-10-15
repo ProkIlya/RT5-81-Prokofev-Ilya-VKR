@@ -22,6 +22,7 @@ PREDICATES = {
     "required_fields_present",
     "supported_schema_types",
     "json_value_equals",
+    "json_collection_matches",
 }
 SOURCES = {"CONTRACT", "USER_DEFINED", "MODEL_HYPOTHESIS"}
 
@@ -113,10 +114,22 @@ def prepare_expectations(
             if not params["path"].startswith("/") or len(params["path"]) > 500:
                 raise ValueError("invalid_pointer")
             for part in params["path"][1:].split("/"):
-                import re
-
                 if re.search(r"~(?![01])", part):
                     raise ValueError("invalid_pointer")
+        elif predicate == "json_collection_matches":
+            if set(params) != {"path", "rows", "mode"} or not isinstance(params["mode"], str) or params["mode"] not in {"contains", "exact", "absent"} or not isinstance(params["path"], str) or len(params["path"]) > 500 or (params["path"] and not params["path"].startswith("/")):
+                raise ValueError("invalid_collection_condition")
+            rows = params["rows"]
+            if not isinstance(rows, list) or not 1 <= len(rows) <= 16:
+                raise ValueError("collection_condition_limit")
+            for row in rows:
+                if not isinstance(row, dict) or not 1 <= len(row) <= 16 or any(not isinstance(path, str) or not path.startswith("/") or len(path) > 500 or isinstance(value, (dict, list)) for path, value in row.items()):
+                    raise ValueError("invalid_collection_row")
+            for path in [params["path"]] + [path for row in rows for path in row]:
+                if re.search(r"~(?![01])", path):
+                    raise ValueError("invalid_pointer")
+            if source == "CONTRACT":
+                raise ValueError("business_condition_requires_user_basis")
         elif predicate == "required_fields_present":
             if (
                 set(params) != {"fields"}
@@ -447,12 +460,37 @@ def validate_exchange(catalog, exchange, expectations):
                         "actual": None,
                         "actual_present": False,
                     }
+            elif predicate == "json_collection_matches":
+                try:
+                    collection = response["json"] if params["path"] == "" else pointer_get(response["json"], params["path"])
+                    matched = []
+                    if isinstance(collection, list):
+                        for template in params["rows"]:
+                            candidates = []
+                            for index, item in enumerate(collection):
+                                try:
+                                    if all(canonical(pointer_get(item, path)) == canonical(expected) for path, expected in template.items()):
+                                        candidates.append(index)
+                                except (KeyError, IndexError, TypeError):
+                                    pass
+                            matched.append(candidates)
+                    observed = isinstance(collection, list) and len(matched) == len(params["rows"]) and all(len(indices) == 1 for indices in matched) and len({indices[0] for indices in matched if len(indices) == 1}) == len(params["rows"])
+                    if params["mode"] == "exact":
+                        observed = observed and len(collection) == len(params["rows"])
+                    elif params["mode"] == "absent":
+                        observed = isinstance(collection, list) and len(matched) == len(params["rows"]) and all(not indices for indices in matched)
+                    details = {"path":params["path"], "expected":display_value(params["rows"]),
+                               "actual":{"unique_match_counts":[len(v) for v in matched],"collection_size":len(collection) if isinstance(collection,list) else None}, "actual_present":True}
+                except (KeyError, IndexError, TypeError):
+                    observed = False
+                    details = {"path":params["path"], "expected":display_value(params["rows"]), "actual":None,"actual_present":False}
         if (
             predicate
             in {
                 "required_fields_present",
                 "supported_schema_types",
                 "json_value_equals",
+                "json_collection_matches",
             }
             and complete
             and not response.get("json_valid", outcome == "received")

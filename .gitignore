@@ -25,6 +25,11 @@ evidence/
 *.sqlite
 *.sqlite3
 *.db
+*.sqlite3.lock
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3.before-migration-*
 
 # Python and editor artifacts.
 .venv/

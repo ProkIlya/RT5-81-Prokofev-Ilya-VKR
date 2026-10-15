@@ -124,3 +124,22 @@ SAFE требует подтверждения точного действия �
 Общий каталог использует окно 8192, резерв ответа 512 и прежний суммарный бюджет 8192 токенов. Сервер запускайте с `-c 8192` по `experiments/local_model/runtime-lock.json`; S05/S06 сохраняют свои меньшие Run limits. Размер окна не гарантирует поддержку любой длины задачи. В prompt входят ограниченные карточки; остальные разрешённые операции доступны через scoped search/inspect. Параметры и тело проверяются программой; защищённые headers задаёт приложение.
 
 Архитектура и результаты: локальные `docs/reports/S07/design-and-interview.md`, `docs/reports/S07/implementation.md`, `PROGRESS.md`. Эти документы и evidence передаются отдельно от Git.
+
+
+## S08: постоянная история
+
+CLI сохраняет историю в SQLite: по умолчанию `<evidence-dir>/history.sqlite3`, либо `--history-db`. Для повторной доставки команды задайте прежние `--project-id`, `--session-id`, `--message-id`; она вернёт сохранённый Run без повторного HTTP. Новый message ID создаёт новый Run. `--parent-run-id` связывает явное продолжение с завершённым Run того же Project.
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m api_agent.storage --db evidence/agent/history.sqlite3 --project cli-project --session cli-session
+python -m api_agent.storage --db evidence/agent/history.sqlite3 --project cli-project --session cli-session --message <answer-message-id>
+python scripts/check_stage.py S08 good
+python scripts/check_stage.py S08 bad
+```
+
+Read-only CLI не открывает target/model, не создаёт отсутствующую базу и не восстанавливает активные запуски. Crash recovery выполняется под execution lease при принятии следующей команды: старый Run становится interrupted; автоматического replay нет. Повтор просмотра ответа возвращает его собственный contract/trace. SQLite не восстанавливает приватные credentials и не реализует память/compaction S13.
+
+В общем каталоге ответ модели разделяет actual HTTP и machine checks. Большой JSON доступен ограниченной проекцией и `read_response` по exchange ID/JSON Pointer, без нового HTTP; неполнота явно обозначена. `json_collection_matches` проверяет содержимое коллекции по доверенным условиям: `path`, `rows` (JSON Pointer → scalar), `mode=contains|exact|absent`. HTTP200 не заменяет содержательную проверку. Модель не создаёт проверенное основание этих условий.
+
+Локальные отчёты реализации, ограничений и экспериментов: [S08](docs/reports/S08/README.md). Текущий статус — [PROGRESS.md](PROGRESS.md); machine checks не заменяют независимый ACCEPT. Разделы S04–S07 выше описывают соответствующие исторические вертикали; ограничение dedup одним процессом больше не относится к SQLite CLI.

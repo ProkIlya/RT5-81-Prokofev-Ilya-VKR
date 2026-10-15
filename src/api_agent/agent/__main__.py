@@ -1,7 +1,6 @@
 """CLI раннего прототипа: доверенные target/spec и цель пользователя.
 
-История пока файловая; новый процесс создаёт новый in-memory application.
-Постоянная дедупликация сообщений появится вместе с SQLite в S08.
+SQLite сохраняет связи после рестарта; JSON/JSONL остаются экспортом evidence.
 """
 
 import argparse
@@ -30,7 +29,14 @@ def main(argv=None, *, model=None, token_counter=None):
     parser.add_argument("--target", required=True)
     parser.add_argument("--spec", required=True)
     parser.add_argument("--llm-target", default="http://127.0.0.1:18081")
+    parser.add_argument("--model-name", default="MiniCPM5-2B-Q4_K_M")
     parser.add_argument("--evidence-dir", default="evidence/agent")
+    parser.add_argument("--history-db", help="SQLite history; default: evidence-dir/history.sqlite3")
+    parser.add_argument("--project-id")
+    parser.add_argument("--session-id", default="cli-session")
+    parser.add_argument("--message-id", help="Повторная доставка использует прежний ID; retest — новый")
+    parser.add_argument("--parent-run-id", help="Явное продолжение новым Run, без replay")
+    parser.add_argument("--environment", default="default")
     parser.add_argument(
         "--conditions",
         help="JSON файл явных условий пользователя: predicate, parameters, intent, preconditions",
@@ -51,6 +57,7 @@ def main(argv=None, *, model=None, token_counter=None):
         help="Ask owner for each concrete CONFIRM action",
     )
     args = parser.parse_args(argv)
+    history = None
     cancel = threading.Event()
     previous_sigint = None
     if threading.current_thread() is threading.main_thread():
@@ -156,7 +163,10 @@ def main(argv=None, *, model=None, token_counter=None):
             )
         elif args.goal_checks or args.runtime_mappings or args.interactive_approval:
             raise ValueError("project_config_required")
-        message_id = str(uuid.uuid4())
+        if args.project_id and project_id and args.project_id != project_id:
+            raise ValueError("foreign_project_configuration")
+        project_id = project_id or args.project_id or "cli-project"
+        message_id = args.message_id or str(uuid.uuid4())
         conditions = None
         if args.conditions:
             descriptors = json.loads(Path(args.conditions).read_text(encoding="utf-8"))
@@ -178,6 +188,8 @@ def main(argv=None, *, model=None, token_counter=None):
                         "basis": {"message_id": message_id},
                     }
                 )
+        from ..storage import SQLiteHistory
+        history = SQLiteHistory(args.history_db or directory / "history.sqlite3")
         app = StartAgentRun(
             args.target,
             catalog,
@@ -185,16 +197,19 @@ def main(argv=None, *, model=None, token_counter=None):
             trace_sink=sink,
             token_counter=token_counter,
             event_sink=JsonlJournal(directory),
+            history_store=history,
+            environment=args.environment,
+            model_name=args.model_name,
         )
         run = app.start(
-            project_id
-            or ("cli-project-" + uuid.uuid4().hex if workflow else "cli-project"),
-            "cli-session-" + uuid.uuid4().hex if workflow else "cli-session",
+            project_id,
+            args.session_id,
             message_id,
             args.goal,
             model if model is not None else LocalModel(args.llm_target),
             conditions=conditions,
             cancel=cancel,
+            parent_run_id=args.parent_run_id,
         )
         print(
             json.dumps(
@@ -203,6 +218,8 @@ def main(argv=None, *, model=None, token_counter=None):
                     "status": run["status"],
                     "stop_reason": run["stop_reason"],
                     "requests": run["requests"],
+                    "response_message_id": run.get("response_message_id"),
+                    "history_db": str(history.path),
                     "trace": str(directory / (run["run_id"] + ".json")),
                     "journal": str(directory / (run["run_id"] + ".jsonl")),
                     "summary": run["report"]["summary"],
@@ -226,6 +243,8 @@ def main(argv=None, *, model=None, token_counter=None):
         )
         return 1
     finally:
+        if history is not None:
+            history.close()
         if previous_sigint is not None:
             signal.signal(signal.SIGINT, previous_sigint)
 

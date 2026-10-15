@@ -65,6 +65,14 @@ class ChainObservationTests(unittest.TestCase):
             self.assertEqual(check['verdict'], 'fail')
             self.assertFalse(check['comparisons'][0]['actual_present'])
 
+    def test_binding_comparison_does_not_equate_boolean_with_integer(self):
+        with DemoServer() as server:
+            _,_,wf,_,read=helpers.GenericExecutionTests().workflow(server)
+            wf.binding_rules[read]['order_id']['response_path']='/id'
+            exchange=dict(id='e',operation_id=read,bound_inputs={'order_id':1},response={'json':{'id':True}})
+            check=wf.binding_check(SimpleNamespace(state=RunState('p','r',{})),exchange)
+            self.assertEqual(check['verdict'],'fail')
+
 
 if __name__ == '__main__':
     unittest.main()

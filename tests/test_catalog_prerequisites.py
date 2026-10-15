@@ -52,7 +52,7 @@ class PrerequisiteTests(unittest.TestCase):
             self.assertIn('name',hint)
             self.assertEqual(server.connections,0)
 
-    def test_known_start_cards_restrict_phase_without_changing_tool_definitions(self):
+    def test_known_start_cards_specialize_execution_without_mutating_other_definitions(self):
         with DemoServer() as server:
             cat,cfg,wf,create,read=GenericExecutionTests().workflow(server)
             seen=[]
@@ -70,6 +70,11 @@ class PrerequisiteTests(unittest.TestCase):
             for payload in seen:
                 for original in payload['tools']:
                     tool = deepcopy(original)
+                    if tool['function']['name'] == 'execute_operation':
+                        selected=tool['function']['parameters']['properties']['operation_id']['enum']
+                        self.assertTrue(set(selected) <= set(wf.allowed))
+                        self.assertEqual(len(selected),1)
+                        continue
                     if tool['function']['name'] == 'finish_run':
                         tool['function']['parameters']['properties']['evidence_ids']['items'].pop('enum', None)
                     self.assertEqual(tool, definitions[tool['function']['name']])

@@ -90,11 +90,10 @@ class CatalogDiscovery:
             "operation_id": name,
             "method": op["method"],
             "path": op["path"],
-            "policy": policy,
-            "auth_required": bool(op["security"]) and name not in self.anonymous,
+            "agent_permission": policy,
+            "api_security": deepcopy(op["security"]),
+            "request_auth": "anonymous_negative" if name in self.anonymous else "credential_reference" if op["security"] else "none",
         }
-        if name in self.anonymous:
-            card["request_auth"] = "anonymous_negative"
         summary = self.catalog.search_metadata.get(name, {}).get("summary")
         if summary:
             card["untrusted_summary"] = summary

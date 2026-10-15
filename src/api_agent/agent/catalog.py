@@ -19,6 +19,8 @@ class CatalogLimits(ChainLimits):
     """Две correction-попытки общего registry; каждый ход расходует тот же budget."""
 
     max_context_tokens: int = 8192
+    max_tokens_total: int = 32768
+    max_prompt_bytes: int = 65536
     malformed_retries: int = 2
 
 
@@ -45,13 +47,18 @@ class CatalogWorkflow:
         auth=None,
         approval=None,
         current_config=None,
-        anonymous_operations=()
+        anonymous_operations=(),
+        goal_coverage="partial",
     ):
         self.catalog, self.config = catalog, config
         self.workflow = self
         self.approval = approval
         self.current_config = current_config or (lambda: config)
         self.goal = goal
+        if goal_coverage not in {"partial", "complete"}:
+            raise ValueError("invalid_goal_coverage")
+        # Полноту требований объявляет доверенная команда, не вывод модели.
+        self.goal_coverage = goal_coverage
         self.conditions = deepcopy(conditions)
         self.extraction = deepcopy(extraction or {})
         self.binding_rules = deepcopy(binding_rules or {})
@@ -128,8 +135,12 @@ class CatalogWorkflow:
                 }:
                     raise ValueError("unsupported_binding_destination")
         if self.auth:
-            if set(self.auth) != {"login_operation", "token_path", "body"}:
+            required = {"login_operation", "token_path", "body"}
+            if not required <= set(self.auth) or set(self.auth) - required - {"public_body_fields"}:
                 raise ValueError("invalid_auth_mapping")
+            public = self.auth.get("public_body_fields", [])
+            if not isinstance(public, list) or len(public) > 16 or any(not isinstance(k, str) or k not in self.auth["body"] for k in public) or len(set(public)) != len(public):
+                raise ValueError("invalid_public_identity_mapping")
             login = self.auth["login_operation"]
             rule = self.extraction.get(login, {}).get(self.auth["token_path"])
             if rule != {"type": "string", "secret": True}:
@@ -194,8 +205,8 @@ class CatalogWorkflow:
     def secrets(self):
         return tuple(
             v
-            for v in (self.auth or {}).get("body", {}).values()
-            if isinstance(v, str) and v
+            for k, v in (self.auth or {}).get("body", {}).items()
+            if isinstance(v, str) and v and k not in (self.auth or {}).get("public_body_fields", [])
         )
 
     def goal_allowed(self, goal):
@@ -332,7 +343,7 @@ class CatalogWorkflow:
                 ),
                 (
                     "search_operations",
-                    "Search API vocabulary.",
+                    'Browse permitted operation names with query="" and cursor, or search API metadata. Then inspect selected operation_id for its exact schema.',
                     search,
                 ),
                 ("read_response", "Read saved JSON page.", saved),
@@ -409,7 +420,7 @@ class CatalogWorkflow:
         """Ограничить ненужный поиск только при полном наборе стартовых карточек.
 
         Выбор operation/аргументов остаётся у модели, policy выполняется обычно.
-        Registry/prefix стабилен; named tool_choice не является разрешением HTTP.
+        Фактические registry/prefix учитываются tokenizer; choice не даёт права HTTP.
         При неполном каталоге и неполном body нужен обычный выбор инструмента.
         """
         manifest = run.get("selection_manifest", {})
@@ -426,6 +437,8 @@ class CatalogWorkflow:
             data = (last.get("observation") or {}).get("data") or {}
             if data.get("checks_complete") and data.get("response_body_complete", True):
                 chosen = "finish_run"
+            elif data.get("verify_unfiltered"):
+                chosen = "execute_operation"
             elif last["action"]["name"] == "search_operations" and "items" in data:
                 chosen = "inspect_operation" if data["items"] else "search_operations"
             elif last["action"]["name"] == "inspect_operation" or any(h.get("readiness") == "ready" for h in data.get("continuation_hints", [])):
@@ -448,10 +461,20 @@ class CatalogWorkflow:
 
         Усечённая проекция не принуждает закончить: read_response остаётся.
         Новые HTTP/search/schema не нужны для уже выполненных условий Run.
-        Определения схем неизменны; фактический subset/prefix записывает loop.
+        Схема execute сужается по OpenAPI/refs; фактический prefix записывает loop.
         """
         done = any(((step.get("observation") or {}).get("data") or {}).get("checks_complete") is True for step in run.get("steps", []))
-        return [t for t in registry if t["function"]["name"] in {"read_response", "finish_run"}] if done else registry
+        if done:
+            return [t for t in registry if t["function"]["name"] in {"read_response", "finish_run"}]
+        from .catalog_inputs import execution_schema
+        selected = execution_schema(self, run)
+        registry = deepcopy(registry)
+        if selected is not None:
+            for tool in registry:
+                if tool['function']['name'] == 'execute_operation':
+                    tool['function']['parameters'] = selected
+                    tool['function']['description'] = 'Execute the shown operation. Required prerequisites are selected from current Run state. Application supplies private credentials; use only issued references.'
+        return registry
 
     def _effective(self):
         current = self.current_config().snapshot
@@ -500,9 +523,10 @@ class CatalogWorkflow:
         # Малый scope можно показать целиком. В большом каталоге нулевая
         # релевантность не даёт основания рекомендовать первые ID по алфавиту.
         # Вместо случайных карточек остаётся scoped vocabulary для поиска.
-        if not ranked and len(policies) <= 2:
-            ranked = self._discovery.ranked("", list(policies))
-        selected = ranked[: 8 if ranked and ranked[0][1] else 2]
+        if len(policies) <= 8:
+            names = {name for name, _ in ranked}
+            ranked += [(name, score) for name, score in self._discovery.ranked('', list(policies)) if name not in names]
+        selected = ranked[:8]
         index = self._discovery.index(list(policies)) if len(selected) < len(policies) else None
         history = history or [
             {"role": "system", "content": self.system()},
@@ -686,6 +710,9 @@ class CatalogWorkflow:
         chain_check = self.binding_check(session, exchange)
         if chain_check is not None:
             data["chain_check"] = chain_check
+        if self.requires_unfiltered(exchange):
+            data["verify_unfiltered"] = True
+            data["selection_scope"] = "Empty filtered response proves absence only for this query. Execute the offered unfiltered read before claiming absence; do not invent filter vocabulary."
         if self.completion(session, session.run["validations"]) != "not_checked":
             # Завершённая проверка может обнаружить дефект API. Подсказка не
             # означает pass и не выполняет finish за модель; критерии и IDs
@@ -779,7 +806,7 @@ class CatalogWorkflow:
         Сравниваем исходный ответ; в diagnostics попадает только redacted body.
         Один результат используется и моделью, и завершающей проверкой цепочки.
         """
-        from ..openapi.parser import pointer_get
+        from ..openapi.parser import pointer_get, canonical
 
         comparisons = []
         for name, expected in exchange.get("bound_inputs", {}).items():
@@ -805,7 +832,7 @@ class CatalogWorkflow:
                 "expected": display_value(expected),
                 "actual": display_value(public_actual),
                 "actual_present": present,
-                "matches": present and actual == expected,
+                "matches": present and canonical(actual) == canonical(expected),
             })
         if not comparisons:
             return None
@@ -816,12 +843,29 @@ class CatalogWorkflow:
             "comparisons": comparisons,
         }
 
+    def requires_unfiltered(self, exchange):
+        """Пустой ответ с необязательным фильтром не доказывает общую пустоту.
+
+        Только модель выбирает следующий HTTP. Для обязательных query inputs
+        полный просмотр недоступен: область цели остаётся явно ограниченной.
+        """
+        from urllib.parse import urlsplit, parse_qsl
+        op = self.catalog.operations[exchange['operation_id']]
+        return (exchange.get('outcome') == 'received'
+            and (exchange.get('response') or {}).get('json') == []
+            and op['method'] == 'GET'
+            and bool(parse_qsl(urlsplit(exchange.get('request', {}).get('url', '')).query))
+            and not any(p['in'] == 'query' and p['required'] for p in op['parameters']))
+
     def completion(self, session, validations):
         latest = {v["operation_id"]: v for v in validations}
         checked = {name for name, v in latest.items() if v["task_postcondition"]}
         if not set(self.conditions) <= checked or len(validations) != len(
             session.exchanges
         ):
+            return "not_checked"
+        latest_exchanges = {e['operation_id']: e for e in session.exchanges}
+        if any(self.requires_unfiltered(e) for e in latest_exchanges.values()):
             return "not_checked"
         for exchange in session.exchanges:
             if exchange["outcome"] != "received":

@@ -30,6 +30,7 @@ def main(argv=None, *, model=None, token_counter=None):
     parser.add_argument("--spec", required=True)
     parser.add_argument("--llm-target", default="http://127.0.0.1:18081")
     parser.add_argument("--model-name", default="MiniCPM5-2B-Q4_K_M")
+    parser.add_argument('--review-summary',action='store_true',help='One isolated advisory consistency check after the agent finishes; no additional API actions')
     parser.add_argument("--evidence-dir", default="evidence/agent")
     parser.add_argument("--history-db", help="SQLite history; default: evidence-dir/history.sqlite3")
     parser.add_argument("--project-id")
@@ -189,6 +190,7 @@ def main(argv=None, *, model=None, token_counter=None):
                     }
                 )
         from ..storage import SQLiteHistory
+        from .summary_review import FinalSummaryReviewer
         history = SQLiteHistory(args.history_db or directory / "history.sqlite3")
         app = StartAgentRun(
             args.target,
@@ -200,6 +202,7 @@ def main(argv=None, *, model=None, token_counter=None):
             history_store=history,
             environment=args.environment,
             model_name=args.model_name,
+            summary_reviewer=FinalSummaryReviewer(model if model is not None else LocalModel(args.llm_target)) if args.review_summary else None,
         )
         run = app.start(
             project_id,
@@ -225,6 +228,9 @@ def main(argv=None, *, model=None, token_counter=None):
                     "summary": run["report"]["summary"],
                     "contract_verdict": run["report"]["contract_verdict"],
                     "intent_verdict": run["report"]["intent_verdict"],
+                    'checks_verdict':run['report']['checks_verdict'],
+                    'goal_verdict':run['report']['goal_verdict'],
+                    **({'summary_review':run['report']['summary_review']} if 'summary_review' in run['report'] else {}),
                     **({"chain_verdict": run["chain_verdict"]} if workflow else {}),
                     "issues": run["report"]["issues"],
                     "issues_total": run["report"]["issues_total"],

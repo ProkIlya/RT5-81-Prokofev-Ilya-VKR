@@ -103,6 +103,13 @@ class BudgetBoundaryTests(unittest.TestCase):
             "chat_template_kwargs": {"enable_thinking": False},
             **f["sampling"],
         }
+        # Завершённые checks оставляют фактический read/finish registry.
+        # Полный discovery registry уже не отправляется в этой фазе.
+        run = {'steps':[{'observation':json.loads(m['content'])}
+                       for m in payload['messages'] if m['role']=='tool']}
+        payload['tools'] = wf.phase_registry(run=run, registry=payload['tools'])
+        self.assertEqual({t['function']['name'] for t in payload['tools']},
+                         {'read_response','finish_run'})
         # Actual runtime добавляет scope enum после HTTP. Он тоже расходует
         # окно/общий бюджет; нельзя проверять только прежнюю свободную string.
         observed = next(m for m in reversed(payload['messages']) if m['role']=='tool')
@@ -111,10 +118,12 @@ class BudgetBoundaryTests(unittest.TestCase):
         evidence = finish['function']['parameters']['properties']['evidence_ids']
         evidence['items'] = {**deepcopy(evidence['items']), 'enum':ids}
         budget = TokenBudget(
-            CatalogLimits(), LocalModel("http://127.0.0.1:18081").count_tokens
+            # Исторический предел сохраняем явно, production уже total32768.
+            CatalogLimits(max_tokens_total=f['total_limit']), LocalModel("http://127.0.0.1:18081").count_tokens
         )
         budget.upper = f["used_tokens"]
         count, reserve = budget.reserve(payload)
+        self.assertLessEqual(count + payload['max_tokens'], budget.limits.max_context_tokens)
         self.assertLessEqual(
             f["used_tokens"] + reserve, f["total_limit"] - f["minimum_headroom"]
         )

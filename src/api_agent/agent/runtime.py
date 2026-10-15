@@ -179,6 +179,7 @@ class StartAgentRun:
         history_store=None,
         environment="default",
         model_name="MiniCPM5-2B-Q4_K_M",
+        summary_reviewer=None,
     ):
         self.target, _ = loopback_origin(target)
         self.catalog = catalog
@@ -226,6 +227,7 @@ class StartAgentRun:
         if not isinstance(model_name, str) or not model_name.strip() or len(model_name) > 200:
             raise ValueError("invalid_model_identity")
         self.model_name = model_name
+        self.summary_reviewer = summary_reviewer
         self._runs = {}
         self._lock = threading.Lock()
 
@@ -310,6 +312,7 @@ class StartAgentRun:
                 "session_id": session_id,
                 "message_id": message_id,
                 "goal": goal,
+                "goal_coverage": getattr(self.workflow, "goal_coverage", "partial"),
                 "target": self.target,
                 "contract": self.catalog.snapshot,
                 "spec_hash": self.catalog.spec_hash,
@@ -450,6 +453,7 @@ class StartAgentRun:
                 auth = getattr(self.workflow, "auth", None)
                 if auth:
                     metadata["auth"] = {k: auth[k] for k in ("login_operation", "token_path")}
+                    metadata["auth"]["public_body_fields"] = list(auth.get("public_body_fields", []))
                 previous = self.history_store.begin_run(
                     project_id, session_id, message_id, self.safe(run),
                     environment=self.environment,
@@ -538,6 +542,23 @@ class StartAgentRun:
             run["stop_category"] = stop_category(run)
             run["resources"]["wall_seconds"] = run["wall_seconds"]
             run["report"] = self.safe(report(run))
+            if self.summary_reviewer is not None:
+                # Новый контекст без API tools; тот же deadline и total budget.
+                # Диагноз LLM не получает права переписать validation/вердикт.
+                reviewed = self.summary_reviewer.review(
+                    self.safe(run), self.limits, self.token_counter or getattr(model, 'count_tokens', None),
+                    started + self.limits.max_seconds,
+                )
+                run['summary_review'] = self.safe(reviewed)
+                run['agent_model_calls'] = run['model_calls']
+                run['review_model_calls'] = reviewed['calls']
+                run['model_calls'] += reviewed['calls']
+                if 'resources' in reviewed:
+                    run['resources'] = reviewed['resources']
+                run['wall_seconds'] = self.clock() - started
+                run['resources']['wall_seconds'] = run['wall_seconds']
+                run['report'] = self.safe(report(run))
+                self._emit(run, 'summary_review', {'status':reviewed['assessment']['status'],'calls':reviewed['calls']})
             try:
                 self._persist_snapshot(run)
             except Exception:
@@ -1007,6 +1028,10 @@ class StartAgentRun:
                 if offered is None:
                     raise ToolArgumentsError("Tool is not offered in this Run. Use the shown operations and available tools; do not repeat a redundant search.")
                 if schema_issues(action["arguments"], offered["function"]["parameters"]):
+                    if action['name'] == 'execute_operation':
+                        properties = offered['function']['parameters']['properties']
+                        hint = {key: value.get('enum', list(value.get('properties', {}))) for key, value in properties.items()}
+                        raise ToolArgumentsError('Use the offered operation and exact input fields: ' + json.dumps(hint, separators=(',', ':')) + '. body=requestBody, parameters=path/query, bindings=issued value refs, credential_ref=issued auth ref. Prerequisites may require login first. Never invent refs.')
                     raise ToolArgumentsError("Arguments must match the offered tool schema. Choose evidence_ids exactly from its enum; never rewrite an ID.")
                 run["empty_consecutive"] = 0
                 step["decision_kind"] = "native_call"

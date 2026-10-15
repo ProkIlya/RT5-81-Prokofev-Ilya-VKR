@@ -567,6 +567,10 @@ def report(run):
     if run.get("chain_verdict") == "fail":
         result["intent_verdict"] = "fail"
         result["task_postcondition"] = True
+    elif run.get('chain_verdict') == 'not_checked' and result.get('intent_verdict') == 'pass':
+        # Успешный login не завершает ещё не выполненную бизнес-цепочку.
+        result['intent_verdict'] = 'not_checked'
+        result['task_postcondition'] = False
     labels = {
         "pass": "соответствует",
         "fail": "не соответствует",
@@ -582,6 +586,10 @@ def report(run):
         + labels.get(result.get("intent_verdict"), "не проверено")
         + "."
     )
+    if run.get('stop_reason') == 'cancelled':
+        summary = 'Выполнение Run отменено. Результаты уже выполненных операций сохранены.'
+    elif run.get('stop_reason') == 'approval_rejected':
+        summary = 'Действие отменено: подтверждение отклонено. Ранее выполненные операции сохранены.'
     unverified = []
     if not result.get("task_postcondition"):
         unverified.append("Поддержанные условия проверки выполнены не полностью.")
@@ -659,8 +667,14 @@ def report(run):
             "recovery": "Явный новый Run после проверки причины; автоматического повторения действий нет.",
         }
     )
+    checks_verdict = {'pass': 'PASS', 'fail': 'FAIL'}.get(result.get('intent_verdict'), 'UNKNOWN')
+    goal_verdict = 'FAIL' if checks_verdict == 'FAIL' else 'PASS' if checks_verdict == 'PASS' and run['status'] == 'completed' and run.get('goal_coverage') == 'complete' else 'UNKNOWN'
     return {
         "summary": summary,
+        "checks_verdict": checks_verdict,
+        "goal_verdict": goal_verdict,
+        "goal_coverage": run.get('goal_coverage', 'partial'),
+        **({'summary_review':deepcopy(run['summary_review']['assessment'])} if 'summary_review' in run else {}),
         "goal": run["goal"],
         "goal_hash": run.get("goal_hash"),
         "execution_status": run["status"],

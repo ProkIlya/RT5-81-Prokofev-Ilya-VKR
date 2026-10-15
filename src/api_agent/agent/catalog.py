@@ -49,6 +49,7 @@ class CatalogWorkflow:
         current_config=None,
         anonymous_operations=(),
         goal_coverage="partial",
+        selection_scopes=None,
     ):
         self.catalog, self.config = catalog, config
         self.workflow = self
@@ -104,6 +105,13 @@ class CatalogWorkflow:
                 self.allowed.append(name)
         if not self.allowed or not set(conditions) <= set(self.allowed):
             raise ValueError("empty_or_unsupported_run_catalog")
+        from ..validation.selection_scope import prepare_scopes
+        self.selection_scopes = prepare_scopes(catalog, conditions, {} if selection_scopes is None else selection_scopes)
+        if goal_coverage == 'complete' and any(
+            catalog.operations[name]['method']=='GET'
+            and any(p['in']=='query' for p in catalog.operations[name]['parameters'])
+            and name not in self.selection_scopes for name in conditions):
+            raise ValueError('complete_goal_requires_selection_scope')
         from .discovery import CatalogDiscovery
 
         self._discovery = CatalogDiscovery(
@@ -230,6 +238,10 @@ class CatalogWorkflow:
                 operation_id=name,
                 expected_status=self._status(name),
             )
+            if name in self.conditions and catalog.operations[name]['method']=='GET':
+                scope = self.selection_scopes.get(name, {'mode':'first_request'})
+                for expectation in result[name]:
+                    expectation['selection_scope'] = deepcopy(scope)
         return result
 
     def prompt_checks(self, checks):
@@ -707,12 +719,17 @@ class CatalogWorkflow:
                 break
         if hints:
             data["continuation_hints"] = hints
-        chain_check = self.binding_check(session, exchange)
+        from ..validation.selection_scope import applicable
+        chain_check = self.binding_check(session, exchange) if applicable(validation) else None
         if chain_check is not None:
             data["chain_check"] = chain_check
         if self.requires_unfiltered(exchange):
             data["verify_unfiltered"] = True
-            data["selection_scope"] = "Empty filtered response proves absence only for this query. Execute the offered unfiltered read before claiming absence; do not invent filter vocabulary."
+            data["selection_scope"] = "The configured check requires an unfiltered request. This filtered response is discovery only; its contents do not decide that check."
+        else:
+            scoped = [c['selection_scope'] for c in validation.get('checks',[]) if 'selection_scope' in c]
+            if scoped:
+                data['selection_scope'] = deepcopy(scoped[0])
         if self.completion(session, session.run["validations"]) != "not_checked":
             # Завершённая проверка может обнаружить дефект API. Подсказка не
             # означает pass и не выполняет finish за модель; критерии и IDs
@@ -844,32 +861,33 @@ class CatalogWorkflow:
         }
 
     def requires_unfiltered(self, exchange):
-        """Пустой ответ с необязательным фильтром не доказывает общую пустоту.
+        """Только явное ожидание без query допускает предложение снять фильтр.
 
         Только модель выбирает следующий HTTP. Для обязательных query inputs
         полный просмотр недоступен: область цели остаётся явно ограниченной.
         """
         from urllib.parse import urlsplit, parse_qsl
         op = self.catalog.operations[exchange['operation_id']]
-        return (exchange.get('outcome') == 'received'
-            and (exchange.get('response') or {}).get('json') == []
+        return (self.selection_scopes.get(exchange['operation_id'],{}).get('mode') == 'unfiltered'
+            and exchange.get('outcome') == 'received'
             and op['method'] == 'GET'
             and bool(parse_qsl(urlsplit(exchange.get('request', {}).get('url', '')).query))
             and not any(p['in'] == 'query' and p['required'] for p in op['parameters']))
 
     def completion(self, session, validations):
-        latest = {v["operation_id"]: v for v in validations}
+        from ..validation.selection_scope import applicable
+        latest = {v["operation_id"]: v for v in validations if applicable(v)}
         checked = {name for name, v in latest.items() if v["task_postcondition"]}
         if not set(self.conditions) <= checked or len(validations) != len(
             session.exchanges
         ):
             return "not_checked"
-        latest_exchanges = {e['operation_id']: e for e in session.exchanges}
-        if any(self.requires_unfiltered(e) for e in latest_exchanges.values()):
-            return "not_checked"
         for exchange in session.exchanges:
             if exchange["outcome"] != "received":
                 return "not_checked"
+            assessed = next((v for v in validations if v.get('exchange_id')==exchange['id']),None)
+            if assessed is not None and not applicable(assessed):
+                continue
             check = self.binding_check(session, exchange)
             if check is not None and check["verdict"] == "fail":
                 return "fail"
@@ -886,7 +904,9 @@ class CatalogSession(PolicySession):
     def __init__(self, target, catalog, workflow, run, limits):
         super().__init__(target, catalog, workflow, run, limits)
         self._bound_inputs = {}
+        self._selection_anchors = {}
         run["run_catalog"] = {
+            "selection_scopes": deepcopy(workflow.selection_scopes),
             "allowed_ids": list(workflow.allowed),
             "operation_hashes": {
                 n: catalog.operation_hashes[n] for n in workflow.allowed
@@ -921,6 +941,7 @@ class CatalogSession(PolicySession):
                 raise CatalogArgumentsError("body_fields_in_parameters", "Use top-level body for JSON requestBody fields: " + ", ".join(misplaced) + ". parameters is path/query ONLY. Do not repeat this call shape.")
             raise ValueError("invalid_parameters")
         self._bound_inputs = {}
+        self._request_parameters = {}
         for key, rule in self.workflow.binding_rules.get(name, {}).items():
             if key in supplied or key not in bindings:
                 refs = [
@@ -1043,11 +1064,16 @@ class CatalogSession(PolicySession):
         action = (name, path, encoded)
         if action in self.actions:
             raise ValueError("duplicate_semantic_action")
+        self._request_parameters = deepcopy(supplied)
         return self.authorize(args, (name, op, path, encoded, None, action))
 
     def execute(self, args):
         exchange = super().execute(args)
         exchange["bound_inputs"] = deepcopy(self._bound_inputs)
+        name = exchange['operation_id']
+        actual = deepcopy(self._request_parameters)
+        exchange['request_parameters'] = actual
+        exchange['initial_request_parameters'] = deepcopy(self._selection_anchors.setdefault(name,actual))
         if (
             self.workflow.auth
             and args["operation_id"] == self.workflow.auth["login_operation"]

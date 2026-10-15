@@ -449,6 +449,7 @@ class StartAgentRun:
                 metadata = {
                     "extraction": getattr(self.workflow, "extraction", {}),
                     "binding_rules": getattr(self.workflow, "binding_rules", {}),
+                    "selection_scopes": getattr(self.workflow, "selection_scopes", {}),
                 }
                 auth = getattr(self.workflow, "auth", None)
                 if auth:
@@ -655,7 +656,8 @@ class StartAgentRun:
                     [
                         {
                             k: e[k]
-                            for k in ("source", "predicate", "parameters", "intent")
+                            for k in ("source", "predicate", "parameters", "intent", "selection_scope")
+                            if k in e
                         }
                         for e in (
                             self.workflow.prompt_checks(run["expectations"])
@@ -781,7 +783,7 @@ class StartAgentRun:
                     not check_fields <= set(check)
                     or set(check)
                     - check_fields
-                    - {"path", "expected", "actual", "actual_present"}
+                    - {"path", "expected", "actual", "actual_present", "selection_scope"}
                     or canonical({k: check[k] for k in identity}) != canonical(identity)
                     or check["verdict"]
                     not in {
@@ -1074,7 +1076,7 @@ class StartAgentRun:
                     )
                     stop(
                         "finished",
-                        "completed" if validation["task_postcondition"] else "partial",
+                        "completed" if validation["task_postcondition"] or run.get('chain_verdict') in {'pass','fail'} else "partial",
                     )
                     run["final"] = self.safe(
                         {**final, "summary": report(run)["summary"]}

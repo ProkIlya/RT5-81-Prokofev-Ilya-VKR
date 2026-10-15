@@ -30,7 +30,7 @@ class SavedResponseTests(unittest.TestCase):
 
     def test_large_response_keeps_meaningful_preview_and_explicit_incompleteness(self):
         cat,wf=self.workflow();session,exchange=self.session();original=deepcopy(exchange)
-        data=wf.observation(session,exchange,{'contract_verdict':'pass','intent_verdict':'pass','task_postcondition':True})
+        data=wf.observation(session,exchange,{'contract_verdict':'pass','intent_verdict':'pass','task_postcondition':True,'checks':[]})
         self.assertIn('response_json',data)
         self.assertEqual(data['response_json'][0]['name'],'Условие 0')
         self.assertFalse(data['response_body_complete'])
@@ -64,7 +64,7 @@ class SavedResponseTests(unittest.TestCase):
     def test_valid_json_null_is_distinct_from_an_unavailable_response(self):
         cat,wf=self.workflow();session,exchange=self.session()
         exchange['response'].update(json=None,json_valid=True)
-        data=wf.observation(session,exchange,{'contract_verdict':'pass','intent_verdict':'pass','task_postcondition':True})
+        data=wf.observation(session,exchange,{'contract_verdict':'pass','intent_verdict':'pass','task_postcondition':True,'checks':[]})
         self.assertIn('response_json',data)
         self.assertIsNone(data['response_json'])
         page=wf.read_response(session,{'exchange_id':'own'})

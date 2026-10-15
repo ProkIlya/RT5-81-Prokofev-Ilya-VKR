@@ -415,7 +415,9 @@ def validate_exchange(catalog, exchange, expectations):
         )
         observed = None
         details = {}
-        if complete:
+        from .selection_scope import scope_result
+        selection = scope_result(expectation, exchange)
+        if complete and (selection is None or selection['applicable']):
             if predicate == "status_in":
                 observed = response["status"] in params["values"]
             elif predicate == "content_type_is_json":
@@ -496,6 +498,8 @@ def validate_exchange(catalog, exchange, expectations):
             and not response.get("json_valid", outcome == "received")
         ):
             observed = None
+        if selection is not None:
+            details['selection_scope'] = selection
         verdict = (
             "not_checked" if observed is None else ("pass" if observed else "fail")
         )
@@ -564,6 +568,14 @@ def report(run):
     здесь отсутствуют. Свободная цель не объявляется полностью формализованной.
     """
     result = deepcopy(run.get("validation") or {})
+    intent_exchange = result.get('exchange_id')
+    if run.get('chain_verdict') in {'pass','fail'} and any(
+        c.get('selection_scope',{}).get('applicable') is False for c in result.get('checks',[])):
+        from .selection_scope import applicable
+        matched = next((v for v in reversed(run.get('validations',[])) if applicable(v) and v['task_postcondition']),None)
+        if matched:
+            result.update(checks=deepcopy(matched['checks']),intent_verdict=run['chain_verdict'],task_postcondition=True)
+            intent_exchange = matched['exchange_id']
     if run.get("chain_verdict") == "fail":
         result["intent_verdict"] = "fail"
         result["task_postcondition"] = True
@@ -674,6 +686,7 @@ def report(run):
         "checks_verdict": checks_verdict,
         "goal_verdict": goal_verdict,
         "goal_coverage": run.get('goal_coverage', 'partial'),
+        "intent_exchange_id": intent_exchange,
         **({'summary_review':deepcopy(run['summary_review']['assessment'])} if 'summary_review' in run else {}),
         "goal": run["goal"],
         "goal_hash": run.get("goal_hash"),

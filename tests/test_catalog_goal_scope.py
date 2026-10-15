@@ -50,8 +50,8 @@ class GoalScopeTests(unittest.TestCase):
             'responses':{'200':{'description':'ok','content':{'application/json':{'schema':{'type':'array','items':{'type':'object'}}}}}}}
         cat=parse_document({'openapi':'3.0.3','info':{'title':'arbitrary','version':'1'},'paths':{'/entries':{'get':operation}}})
         cfg=ProjectConfig.create('p','http://127.0.0.1:18080',cat,mode='READ_ONLY',resettable=True,operations={'browse':'A'})
-        wf=CatalogWorkflow(cat,cfg,goal='Покажи записи',conditions={'browse':[support.status_condition(200)]})
-        validation={'operation_id':'browse','contract_verdict':'pass','intent_verdict':'pass','task_postcondition':True}
+        wf=CatalogWorkflow(cat,cfg,goal='Покажи записи',conditions={'browse':[support.status_condition(200)]},selection_scopes={'browse':{'mode':'unfiltered'}})
+        validation={'operation_id':'browse','contract_verdict':'pass','intent_verdict':'not_checked','task_postcondition':False,'checks':[]}
         exchange={'id':'e','operation_id':'browse','outcome':'received','request':{'url':'http://127.0.0.1:18080/entries?category=guessed'},'response':{'status':200,'json':[],'json_valid':True}}
         run={'run_id':'r','expectations':wf.prepared(cat,'m',wf.goal)['browse'],'validations':[validation],'steps':[],'exchanges':[exchange]}
         session=SimpleNamespace(state=RunState('p','r',{}),run=run,exchanges=[exchange])

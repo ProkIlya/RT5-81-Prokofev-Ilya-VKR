@@ -236,7 +236,7 @@ class CatalogWorkflow:
         )
 
     policy_version = "project-policy-v1"
-    prompt_version = "runtime-catalog-v7"
+    prompt_version = "runtime-catalog-v10"
     inspect_sections = True
     default_limits = CatalogLimits
 
@@ -255,6 +255,24 @@ class CatalogWorkflow:
             bindings={"type": "object"},
             credential_ref=scalar,
         )
+        # Публикуем только применимые к pinned allowlist виды входов. Иначе
+        # модель заполняет body/auth даже для анонимного GET без параметров.
+        # Union сохраняет поля, нужные хотя бы одной разрешённой операции;
+        # конкретные значения и policy по-прежнему проверяет session.
+        operations = [catalog.operations[name] for name in self.allowed]
+        applicable = {
+            "parameters": any(op["parameters"] for op in operations),
+            "body": any("requestBody" in catalog.operations[name]
+                        and not (self.auth and name == self.auth["login_operation"])
+                        for name in self.allowed),
+            "bindings": any(self.binding_rules.get(name) for name in self.allowed),
+            "credential_ref": any(catalog.operations[name]["security"]
+                                  and name not in self.anonymous_operations
+                                  for name in self.allowed),
+        }
+        for field, needed in applicable.items():
+            if not needed:
+                execution["properties"].pop(field)
         inspect = deepcopy(op)
         inspect["properties"]["section"] = {
             "type": "string",
@@ -397,6 +415,8 @@ class CatalogWorkflow:
         manifest = run.get("selection_manifest", {})
         steps = [s for s in run.get("steps", []) if s.get("action")]
         if not steps and set(manifest.get("selected_ids", [])) != set(self.allowed):
+            if not manifest.get("selected_ids"):
+                return {"type": "function", "function": {"name": "search_operations"}}
             return "required"
         chosen = "inspect_operation"
         if not steps and all(not any(p["required"] for p in self.catalog.operations[name]["parameters"]) and not self.catalog.operations[name].get("requestBody", {}).get("required") and (not self.catalog.operations[name]["security"] or name in self.anonymous_operations) for name in self.allowed):
@@ -406,8 +426,8 @@ class CatalogWorkflow:
             data = (last.get("observation") or {}).get("data") or {}
             if data.get("checks_complete") and data.get("response_body_complete", True):
                 chosen = "finish_run"
-            elif last["action"]["name"] == "search_operations" and data.get("items"):
-                chosen = "inspect_operation"
+            elif last["action"]["name"] == "search_operations" and "items" in data:
+                chosen = "inspect_operation" if data["items"] else "search_operations"
             elif last["action"]["name"] == "inspect_operation" or any(h.get("readiness") == "ready" for h in data.get("continuation_hints", [])):
                 chosen = "execute_operation"
             else:
@@ -477,7 +497,10 @@ class CatalogWorkflow:
         self._redactors[run["run_id"]] = redactor or (lambda value: value)
         current, policies = self._effective()
         ranked = self._discovery.ranked(self.goal, list(policies), max_characters=2000)
-        if not ranked:
+        # Малый scope можно показать целиком. В большом каталоге нулевая
+        # релевантность не даёт основания рекомендовать первые ID по алфавиту.
+        # Вместо случайных карточек остаётся scoped vocabulary для поиска.
+        if not ranked and len(policies) <= 2:
             ranked = self._discovery.ranked("", list(policies))
         selected = ranked[: 8 if ranked and ranked[0][1] else 2]
         index = self._discovery.index(list(policies)) if len(selected) < len(policies) else None
@@ -704,6 +727,11 @@ class CatalogWorkflow:
             if "response_json" in data:
                 http["body"] = data.pop("response_json")
             data["http_response"] = http
+            # Полный body уже присутствует в проекции. Техническая метка
+            # старого DTO response.json здесь ложна; реальные omissions
+            # частичной/усечённой выдачи остаются и в prompt, и в raw trace.
+            if "body" in http and data.get("response_body_complete", True) and not result.get("truncated") and output.get("omitted_fields") == ["response.json"]:
+                output.pop("omitted_fields")
             validation = data.pop("validation")
             checks = {
                 "contract_verdict": validation["contract_verdict"],

@@ -74,6 +74,8 @@ class BudgetBoundaryTests(unittest.TestCase):
                 data["outcome"] = http["outcome"]
                 if "body" in http:
                     data["response_json"] = http["body"]
+                    if data.get('response_body_complete', True) and not a.get('truncated') and a.get('omitted_fields') == ['response.json']:
+                        a.pop('omitted_fields')
                 checks = data.pop("machine_checks")
                 data["validation"] = {
                     "contract_verdict": checks["contract_verdict"],
@@ -101,6 +103,13 @@ class BudgetBoundaryTests(unittest.TestCase):
             "chat_template_kwargs": {"enable_thinking": False},
             **f["sampling"],
         }
+        # Actual runtime добавляет scope enum после HTTP. Он тоже расходует
+        # окно/общий бюджет; нельзя проверять только прежнюю свободную string.
+        observed = next(m for m in reversed(payload['messages']) if m['role']=='tool')
+        ids = json.loads(observed['content'])['data']['finish_evidence_ids']
+        finish = next(t for t in payload['tools'] if t['function']['name']=='finish_run')
+        evidence = finish['function']['parameters']['properties']['evidence_ids']
+        evidence['items'] = {**deepcopy(evidence['items']), 'enum':ids}
         budget = TokenBudget(
             CatalogLimits(), LocalModel("http://127.0.0.1:18081").count_tokens
         )

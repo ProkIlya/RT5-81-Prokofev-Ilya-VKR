@@ -24,7 +24,7 @@ class ProjectionTests(unittest.TestCase):
                           'expected_status_codes':[401]},
             'finish_evidence_ids':['actual-exchange'],'checks_complete':True,
             'next_hint':'Call finish_run with all finish_evidence_ids.'},
-            'error':None,'evidence_ids':['actual-exchange'],'omitted_fields':[],'truncated':False}
+            'error':None,'evidence_ids':['actual-exchange'],'omitted_fields':['response.json'],'truncated':False}
         original = deepcopy(record)
         projected = wf.model_result(record)
         self.assertIn('tool_execution', projected, 'Успех инструмента смешан с HTTP status')
@@ -36,6 +36,10 @@ class ProjectionTests(unittest.TestCase):
         self.assertNotIn('status', projected['data'])
         self.assertNotIn('validation', projected['data'])
         self.assertEqual(record, original)
+        self.assertNotIn('omitted_fields', projected)
+        partial = deepcopy(record)
+        partial['data']['response_body_complete'] = False
+        self.assertEqual(wf.model_result(partial)['omitted_fields'], ['response.json'])
 
     def test_projection_preserves_data_and_diagnostics_without_mutating_record(self):
         cat = catalog_variant("x")

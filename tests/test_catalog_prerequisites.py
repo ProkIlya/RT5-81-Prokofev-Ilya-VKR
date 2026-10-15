@@ -1,6 +1,7 @@
 """Диагностика входов и выбор фаз предотвращают пустые поиски и угадывание auth."""
 
 import sys,json,unittest
+from copy import deepcopy
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'src'),str(ROOT/'tests'),str(ROOT)]
@@ -66,7 +67,12 @@ class PrerequisiteTests(unittest.TestCase):
             self.assertEqual(run['status'],'completed')
             self.assertEqual([p['tool_choice']['function']['name'] for p in seen],['inspect_operation','execute_operation','execute_operation','finish_run'])
             definitions={t['function']['name']:t for t in wf.registry(cat)}
-            self.assertTrue(all(t==definitions[t['function']['name']] for p in seen for t in p['tools']))
+            for payload in seen:
+                for original in payload['tools']:
+                    tool = deepcopy(original)
+                    if tool['function']['name'] == 'finish_run':
+                        tool['function']['parameters']['properties']['evidence_ids']['items'].pop('enum', None)
+                    self.assertEqual(tool, definitions[tool['function']['name']])
             self.assertNotIn('search_operations',[t['function']['name'] for t in seen[0]['tools']])
             self.assertEqual(run['model_calls'],4)
 

@@ -148,5 +148,9 @@ class CatalogDiscovery:
             "source": "RUN_CATALOG",
             # Карточка содержит ID/path, но не декларацию входных параметров.
             # Это подсказка выбора инструмента, не автоматическое inspect/HTTP.
-            "next_hint": "Call inspect_operation for the chosen operation_id.",
+            "next_hint": (
+                "Call inspect_operation for the chosen operation_id."
+                if selected else
+                "No metadata matched. Use search_operations with API vocabulary from initial context; search covers operation names/paths/summaries, not response values."
+            ),
         }

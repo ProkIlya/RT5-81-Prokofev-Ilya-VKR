@@ -219,7 +219,9 @@ class ResilienceTests(unittest.TestCase):
         self.assertNotEqual(
             run["steps"][0]["window_hash"], run["steps"][1]["window_hash"]
         )
-        self.assertEqual(run["steps"][0]["prefix_hash"], run["steps"][1]["prefix_hash"])
+        # После HTTP появляется scoped enum evidence, поэтому actual prefix
+        # обязан измениться; history/native пары при этом не переписываются.
+        self.assertNotEqual(run["steps"][0]["prefix_hash"], run["steps"][1]["prefix_hash"])
         self.assertEqual(run["goal"], "Check pet")
         self.assertEqual(run["stop_category"], "done")
 

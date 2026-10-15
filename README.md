@@ -143,3 +143,18 @@ Read-only CLI не открывает target/model, не создаёт отсу
 В общем каталоге ответ модели разделяет actual HTTP и machine checks. Большой JSON доступен ограниченной проекцией и `read_response` по exchange ID/JSON Pointer, без нового HTTP; неполнота явно обозначена. `json_collection_matches` проверяет содержимое коллекции по доверенным условиям: `path`, `rows` (JSON Pointer → scalar), `mode=contains|exact|absent`. HTTP200 не заменяет содержательную проверку. Модель не создаёт проверенное основание этих условий.
 
 Локальные отчёты реализации, ограничений и экспериментов: [S08](docs/reports/S08/README.md). Текущий статус — [PROGRESS.md](PROGRESS.md); machine checks не заменяют независимый ACCEPT. Разделы S04–S07 выше описывают соответствующие исторические вертикали; ограничение dedup одним процессом больше не относится к SQLite CLI.
+
+### Экспериментальный Qwen3-4B
+
+Для сравнения STAND-37 загружен официальный `Qwen/Qwen3-4B-GGUF`, `Q4_K_M` (revision `bc640142c66e1fdd12af0bd68f40445458f3869b`). SHA256: `7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5`. Веса находятся в `models/Qwen3-4B/` на диске D и не входят в Git. Основная конфигурация MiniCPM не заменена.
+
+На GTX1060 3GB кандидат запущен с частичным GPU offload. После остановки текущего локального runtime команда из корня проекта:
+
+```powershell
+./experiments/local_model/runtime/cuda/llama-server.exe -m ./models/Qwen3-4B/Qwen3-4B-Q4_K_M.gguf --host 127.0.0.1 --port 18081 -c 8192 -ngl 24 -b 128 -ub 64 -t 4 -np 1 --jinja --no-webui -lv 4
+```
+
+Дождитесь `/health` со статусом `ok`. В команде агента задайте `--model-name Qwen3-4B-Q4_K_M`: это фиксирует имя в trace, сами веса выбираются при запуске llama-server. Для сравнения на изолированном стенде: `python scripts/evaluate_stand.py --output evidence/S08/qwen3-live --model-name Qwen3-4B-Q4_K_M`. Требуются локальные docs/evals и owner helper стенда; collector exit0 означает сбор данных, свободные объяснения оцениваются отдельно. Скорость и качество на произвольных целях этим не гарантируются.
+
+
+Второй кандидат — `unsloth/Qwen3.5-4B-GGUF`, `IQ4_XS`, revision `e87f176479d0855a907a41277aca2f8ee7a09523`; SHA256 `658a9e7e406deb06d0179755e3c14f6a82915a4be4962a2f92a64d948d2e572f`. Для него в команде runtime замените путь на `./models/Qwen3.5-4B/Qwen3.5-4B-IQ4_XS.gguf`, `-ngl 24` на `-ngl 99`, а имя в CLI на `Qwen3.5-4B-IQ4_XS`. Проверено 33/33 GPU layers при context8192 на этом GTX1060. Объяснения STAND-37 согласованы в шести прогонах, однако дополнительный библиотечный сценарий не пройден; кандидат не выбран основным автоматически. Профиль и подробные результаты локальные: `experiments/local_model/qwen35-4b-lock.json`, `docs/reports/S08/model-comparison-2026-10-15.md`.

@@ -875,6 +875,16 @@ class StartAgentRun:
             }
             if self.workflow and hasattr(self.workflow, "phase_registry"):
                 payload["tools"] = self.workflow.phase_registry(run, payload["tools"])
+            # UUID нельзя надёжно переписывать малой моделью как свободный
+            # текст. Native grammar предлагает только уже наблюдённые ID;
+            # session всё равно проверяет scope и полноту evidence.
+            if run["exchanges"]:
+                for tool in payload["tools"]:
+                    if tool["function"]["name"] == "finish_run":
+                        evidence = tool["function"]["parameters"]["properties"]["evidence_ids"]
+                        # Базовые schemas могут разделять один scalar object
+                        # с credential_ref: enum относится только к evidence.
+                        evidence["items"] = {**deepcopy(evidence["items"]), "enum": [e["id"] for e in run["exchanges"]]}
             if hasattr(model, "prepare_payload"):
                 payload = model.prepare_payload(payload)
             prompt_bytes = len(canonical(payload))
@@ -993,8 +1003,11 @@ class StartAgentRun:
                     stop("token_limit")
                     break
                 call, action = self._decision(response)
-                if action["name"] not in {tool["function"]["name"] for tool in payload["tools"]}:
+                offered = next((tool for tool in payload["tools"] if tool["function"]["name"] == action["name"]), None)
+                if offered is None:
                     raise ToolArgumentsError("Tool is not offered in this Run. Use the shown operations and available tools; do not repeat a redundant search.")
+                if schema_issues(action["arguments"], offered["function"]["parameters"]):
+                    raise ToolArgumentsError("Arguments must match the offered tool schema. Choose evidence_ids exactly from its enum; never rewrite an ID.")
                 run["empty_consecutive"] = 0
                 step["decision_kind"] = "native_call"
                 step["action"] = self.safe(action)

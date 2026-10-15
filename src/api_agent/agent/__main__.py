@@ -50,7 +50,7 @@ def main(argv=None, *, model=None, token_counter=None):
     )
     parser.add_argument(
         "--runtime-mappings",
-        help="Trusted extraction/binding/auth JSON; credentials remain private",
+        help="Trusted extraction/binding/auth/selection_scopes JSON; credentials remain private",
     )
     parser.add_argument(
         "--interactive-approval",
@@ -135,6 +135,7 @@ def main(argv=None, *, model=None, token_counter=None):
                 "binding_rules",
                 "auth",
                 "anonymous_operations",
+                "selection_scopes",
             }:
                 raise ValueError("invalid_runtime_mappings")
 

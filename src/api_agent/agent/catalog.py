@@ -10,7 +10,7 @@ import json
 from urllib.parse import quote, urlencode
 from ..bounded_json import validate_tree
 from ..policy import ProjectConfig, PolicySession, decision
-from ..validation import prepare_expectations, schema_issues, fingerprint
+from ..validation import prepare_expectations, schema_issues, fingerprint, display_value
 from ..agent.chains import _validate_extraction, ChainLimits
 
 
@@ -683,6 +683,9 @@ class CatalogWorkflow:
                 break
         if hints:
             data["continuation_hints"] = hints
+        chain_check = self.binding_check(session, exchange)
+        if chain_check is not None:
+            data["chain_check"] = chain_check
         if self.completion(session, session.run["validations"]) != "not_checked":
             # Завершённая проверка может обнаружить дефект API. Подсказка не
             # означает pass и не выполняет finish за модель; критерии и IDs
@@ -740,6 +743,13 @@ class CatalogWorkflow:
             }
             if "expected_status_codes" in validation:
                 checks["expected_status_codes"] = validation["expected_status_codes"]
+            if "chain_check" in data:
+                # HTTP/schema и локальные predicates могут пройти, хотя сервер
+                # вернул другой связанный объект. Это тот же check, что в finish.
+                checks["response_expectation_verdict"] = checks["expectation_verdict"]
+                checks["chain_verdict"] = data["chain_check"]["verdict"]
+                if checks["chain_verdict"] == "fail":
+                    checks["expectation_verdict"] = "fail"
             data["machine_checks"] = checks
         if isinstance(data, dict) and data.get("checks_complete") is True:
             # Finish определяет next_tool; повтор подсказки не является фактом.
@@ -763,6 +773,49 @@ class CatalogWorkflow:
         """
         return json.dumps(public_result, ensure_ascii=False, separators=(",", ":"))
 
+    def binding_check(self, session, exchange):
+        """Проверить настроенные связи по данным обмена, без знания домена API.
+
+        Сравниваем исходный ответ; в diagnostics попадает только redacted body.
+        Один результат используется и моделью, и завершающей проверкой цепочки.
+        """
+        from ..openapi.parser import pointer_get
+
+        comparisons = []
+        for name, expected in exchange.get("bound_inputs", {}).items():
+            rule = self.binding_rules.get(exchange["operation_id"], {}).get(name, {})
+            path = rule.get("response_path")
+            if not path:
+                continue
+            body = (exchange.get("response") or {}).get("json")
+            present, actual = True, None
+            try:
+                actual = pointer_get(body, path)
+            except (ValueError, KeyError, IndexError, TypeError):
+                present = False
+            public_actual = None
+            if present:
+                try:
+                    public_actual = pointer_get(session.state.redact(body), path)
+                except (ValueError, KeyError, IndexError, TypeError):
+                    public_actual = "[REDACTED]"
+            comparisons.append({
+                "parameter": name,
+                "response_path": path,
+                "expected": display_value(expected),
+                "actual": display_value(public_actual),
+                "actual_present": present,
+                "matches": present and actual == expected,
+            })
+        if not comparisons:
+            return None
+        return {
+            "verdict": "pass" if all(c["matches"] for c in comparisons) else "fail",
+            "basis": "runtime_reference_binding",
+            "exchange_id": exchange["id"],
+            "comparisons": comparisons,
+        }
+
     def completion(self, session, validations):
         latest = {v["operation_id"]: v for v in validations}
         checked = {name for name, v in latest.items() if v["task_postcondition"]}
@@ -773,19 +826,9 @@ class CatalogWorkflow:
         for exchange in session.exchanges:
             if exchange["outcome"] != "received":
                 return "not_checked"
-            for name, value in exchange.get("bound_inputs", {}).items():
-                rule = self.binding_rules.get(exchange["operation_id"], {}).get(
-                    name, {}
-                )
-                path = rule.get("response_path")
-                if path:
-                    from ..openapi.parser import pointer_get
-
-                    try:
-                        if pointer_get(exchange["response"]["json"], path) != value:
-                            return "fail"
-                    except (ValueError, KeyError, TypeError):
-                        return "fail"
+            check = self.binding_check(session, exchange)
+            if check is not None and check["verdict"] == "fail":
+                return "fail"
         return (
             "fail"
             if any(latest[name]["intent_verdict"] == "fail" for name in self.conditions)

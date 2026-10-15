@@ -117,10 +117,46 @@ python scripts/check_stage.py S07 good # ожидается 0; настоящи�
 python scripts/check_stage.py S07 bad  # ожидается 2; доказанный отказ
 ```
 
-`--goal-checks` содержит объект operation_id → список доверенных scalar predicates (`predicate`, `parameters`, `intent`, `preconditions`). `--runtime-mappings` содержит правила `extraction`, `binding_rules`, `auth`, `anonymous_operations`; модель не создаёт эти правила. Для общего каталога credentials задаются в приватном `auth.body` файла `--runtime-mappings`; `--credentials-file` применяется к пилотному `--workflow auth-read`. Неподдержанные схемы/критерии отклоняются; общий исполнитель ещё не является автоматическим oracle для произвольной бизнес-цели.
+`--goal-checks` содержит объект operation_id → список доверенных scalar predicates (`predicate`, `parameters`, `intent`, `preconditions`). `--runtime-mappings` содержит правила `extraction`, `binding_rules`, `auth`, `anonymous_operations`, `selection_scopes`; модель не создаёт эти правила. Неизвестные поля отклоняются до запуска. Для общего каталога credentials задаются в приватном `auth.body` файла `--runtime-mappings`; `--credentials-file` применяется к пилотному `--workflow auth-read`. Неподдержанные схемы/критерии отклоняются; общий исполнитель ещё не является автоматическим oracle для произвольной бизнес-цели.
+
+Область проверки GET задаётся до HTTP в `selection_scopes`, например `{"selection_scopes":{"listItems":{"mode":"exact","parameters":{"category":"active"}}}}` — только указанная выборка; `{"selection_scopes":{"listItems":{"mode":"unfiltered"}}}` — чтение без query. Здесь `listItems` и `category` — примеры: используются реальные operationId и параметры вашей спецификации. Обязательные path-параметры передаются в `parameters` в обоих режимах. Для `unfiltered` query-параметры недопустимы; типы значений и принадлежность операции условиям проверяются по каталогу. Без явной области условия привязываются к первому запросу и не доказывают глобальное свойство коллекции. Область сохраняется в истории Run; повторное чтение истории не вызывает API или модель.
 
 SAFE требует подтверждения точного действия перед HTTP; READ_ONLY запрещает изменения; TEST разрешает предусмотренные policy изменения только на resettable target. Риски D/E требуют подтверждения. Approval привязан к Run/config/action hash; отмена, отказ, просрочка и изменение конфигурации прекращают действие. Исходные права Run не расширяются: новая операция требует нового Run. Неопределённый исход изменяющего запроса не повторяется автоматически.
 
 Общий каталог использует окно 8192, резерв ответа 512 и прежний суммарный бюджет 8192 токенов. Сервер запускайте с `-c 8192` по `experiments/local_model/runtime-lock.json`; S05/S06 сохраняют свои меньшие Run limits. Размер окна не гарантирует поддержку любой длины задачи. В prompt входят ограниченные карточки; остальные разрешённые операции доступны через scoped search/inspect. Параметры и тело проверяются программой; защищённые headers задаёт приложение.
 
 Архитектура и результаты: локальные `docs/reports/S07/design-and-interview.md`, `docs/reports/S07/implementation.md`, `PROGRESS.md`. Эти документы и evidence передаются отдельно от Git.
+
+
+## S08: постоянная история
+
+CLI сохраняет историю в SQLite: по умолчанию `<evidence-dir>/history.sqlite3`, либо `--history-db`. Для повторной доставки команды задайте прежние `--project-id`, `--session-id`, `--message-id`; она вернёт сохранённый Run без повторного HTTP. Новый message ID создаёт новый Run. `--parent-run-id` связывает явное продолжение с завершённым Run того же Project.
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m api_agent.storage --db evidence/agent/history.sqlite3 --project cli-project --session cli-session
+python -m api_agent.storage --db evidence/agent/history.sqlite3 --project cli-project --session cli-session --message <answer-message-id>
+python scripts/check_stage.py S08 good
+python scripts/check_stage.py S08 bad
+```
+
+Read-only CLI не открывает target/model, не создаёт отсутствующую базу и не восстанавливает активные запуски. Crash recovery выполняется под execution lease при принятии следующей команды: старый Run становится interrupted; автоматического replay нет. Повтор просмотра ответа возвращает его собственный contract/trace. SQLite не восстанавливает приватные credentials и не реализует память/compaction S13.
+
+В общем каталоге ответ модели разделяет actual HTTP и machine checks. Большой JSON доступен ограниченной проекцией и `read_response` по exchange ID/JSON Pointer, без нового HTTP; неполнота явно обозначена. `json_collection_matches` проверяет содержимое коллекции по доверенным условиям: `path`, `rows` (JSON Pointer → scalar), `mode=contains|exact|absent`. HTTP200 не заменяет содержательную проверку. Модель не создаёт проверенное основание этих условий.
+
+Локальные отчёты реализации, ограничений и экспериментов: [S08](docs/reports/S08/README.md). Текущий статус — [PROGRESS.md](PROGRESS.md); machine checks не заменяют независимый ACCEPT. Разделы S04–S07 выше описывают соответствующие исторические вертикали; ограничение dedup одним процессом больше не относится к SQLite CLI.
+
+### Экспериментальный Qwen3-4B
+
+Для сравнения STAND-37 загружен официальный `Qwen/Qwen3-4B-GGUF`, `Q4_K_M` (revision `bc640142c66e1fdd12af0bd68f40445458f3869b`). SHA256: `7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5`. Веса находятся в `models/Qwen3-4B/` на диске D и не входят в Git. Основная конфигурация MiniCPM не заменена.
+
+На GTX1060 3GB кандидат запущен с частичным GPU offload. После остановки текущего локального runtime команда из корня проекта:
+
+```powershell
+./experiments/local_model/runtime/cuda/llama-server.exe -m ./models/Qwen3-4B/Qwen3-4B-Q4_K_M.gguf --host 127.0.0.1 --port 18081 -c 8192 -ngl 24 -b 128 -ub 64 -t 4 -np 1 --jinja --no-webui -lv 4
+```
+
+Дождитесь `/health` со статусом `ok`. В команде агента задайте `--model-name Qwen3-4B-Q4_K_M`: это фиксирует имя в trace, сами веса выбираются при запуске llama-server. Для сравнения на изолированном стенде: `python scripts/evaluate_stand.py --output evidence/S08/qwen3-live --model-name Qwen3-4B-Q4_K_M`. Требуются локальные docs/evals и owner helper стенда; collector exit0 означает сбор данных, свободные объяснения оцениваются отдельно. Скорость и качество на произвольных целях этим не гарантируются.
+
+
+Второй кандидат — `unsloth/Qwen3.5-4B-GGUF`, `IQ4_XS`, revision `e87f176479d0855a907a41277aca2f8ee7a09523`; SHA256 `658a9e7e406deb06d0179755e3c14f6a82915a4be4962a2f92a64d948d2e572f`. Для него в команде runtime замените путь на `./models/Qwen3.5-4B/Qwen3.5-4B-IQ4_XS.gguf`, `-ngl 24` на `-ngl 99`, а имя в CLI на `Qwen3.5-4B-IQ4_XS`. Проверено 33/33 GPU layers при context8192 на этом GTX1060. Объяснения STAND-37 согласованы в шести прогонах, однако дополнительный библиотечный сценарий не пройден; кандидат не выбран основным автоматически. Профиль и подробные результаты локальные: `experiments/local_model/qwen35-4b-lock.json`, `docs/reports/S08/model-comparison-2026-10-15.md`.

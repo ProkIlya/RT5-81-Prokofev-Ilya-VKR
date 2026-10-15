@@ -89,7 +89,7 @@ class FinishHintsTests(unittest.TestCase):
                     return reply("execute_operation", {"operation_id": "getPet"})
                 observation = json.loads(payload["messages"][-1]["content"])["data"]
                 self.assertTrue(observation["checks_complete"])
-                self.assertIn("finish_run", observation["next_hint"])
+                self.assertEqual(payload["tool_choice"]["function"]["name"], "finish_run")
                 return reply(
                     "finish_run",
                     {

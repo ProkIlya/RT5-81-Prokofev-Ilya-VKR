@@ -44,6 +44,10 @@ class ObserverModel:
             if o.get("data", o) is not None or o.get("evidence_ids")
         ]
         exchanges = [o for o in observations if "exchange_id" in o]
+        exchanges = [
+            {**o, **({"outcome": o["http_response"]["outcome"]} if "http_response" in o else {})}
+            for o in exchanges
+        ]
         if not exchanges:
             return reply("execute_operation", {"operation_id": "getPet"})
         if exchanges[-1]["outcome"] != "received" and not any(

@@ -7,6 +7,7 @@ socket I/O; после ответа loop повторно проверяет о�
 import http.client
 import json
 import time
+from copy import deepcopy
 from ..first_http import loopback_origin
 from ..socket_deadline import SocketDeadline
 from .streaming import collect_stream
@@ -48,6 +49,27 @@ class LocalModel:
         Адаптер используется последовательно одним application loop.
         """
         self._run_deadline = deadline
+
+    @staticmethod
+    def prepare_payload(payload):
+        """Locked runtime принимает строковый choice, а named object игнорирует.
+
+        Сохраняем смысл forced function через одно опубликованное определение.
+        Один и тот же payload используется для tokenizer и generation; никакого
+        скрытого расширения tools или изменения аргументов модельного ответа.
+        """
+        prepared = deepcopy(payload)
+        choice = prepared.get("tool_choice")
+        if isinstance(choice, dict):
+            if set(choice) != {"type", "function"} or choice["type"] != "function" or not isinstance(choice["function"], dict) or set(choice["function"]) != {"name"}:
+                raise ValueError("invalid_named_tool_choice")
+            selected = [t for t in prepared.get("tools", []) if t.get("function", {}).get("name") == choice["function"]["name"]]
+            if len(selected) != 1:
+                raise ValueError("unknown_named_tool_choice")
+            prepared["tools"] = selected
+            prepared["tool_choice"] = "required"
+            prepared["messages"].append({"role":"user", "content":"For this turn call " + choice["function"]["name"] + " only. This is one step, not the whole task; other tool types become available on later turns. Return one tool call."})
+        return prepared
 
     def _json_request(self, path, payload):
         """Вызвать только внутренний endpoint того же фиксированного runtime.
@@ -102,6 +124,7 @@ class LocalModel:
         parse_special=true совпадают с разбором сформированного prompt.
         Совпадение с actual prompt_tokens отдельно проверяет TokenBudget.
         """
+        payload = self.prepare_payload(payload)
         data = {
             key: payload[key]
             for key in (
@@ -136,6 +159,7 @@ class LocalModel:
         return len(tokens)
 
     def __call__(self, payload):
+        payload = self.prepare_payload(payload)
         started = time.monotonic()
         deadline = min(
             value

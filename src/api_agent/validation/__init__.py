@@ -22,6 +22,7 @@ PREDICATES = {
     "required_fields_present",
     "supported_schema_types",
     "json_value_equals",
+    "json_collection_matches",
 }
 SOURCES = {"CONTRACT", "USER_DEFINED", "MODEL_HYPOTHESIS"}
 
@@ -113,10 +114,22 @@ def prepare_expectations(
             if not params["path"].startswith("/") or len(params["path"]) > 500:
                 raise ValueError("invalid_pointer")
             for part in params["path"][1:].split("/"):
-                import re
-
                 if re.search(r"~(?![01])", part):
                     raise ValueError("invalid_pointer")
+        elif predicate == "json_collection_matches":
+            if set(params) != {"path", "rows", "mode"} or not isinstance(params["mode"], str) or params["mode"] not in {"contains", "exact", "absent"} or not isinstance(params["path"], str) or len(params["path"]) > 500 or (params["path"] and not params["path"].startswith("/")):
+                raise ValueError("invalid_collection_condition")
+            rows = params["rows"]
+            if not isinstance(rows, list) or not 1 <= len(rows) <= 16:
+                raise ValueError("collection_condition_limit")
+            for row in rows:
+                if not isinstance(row, dict) or not 1 <= len(row) <= 16 or any(not isinstance(path, str) or not path.startswith("/") or len(path) > 500 or isinstance(value, (dict, list)) for path, value in row.items()):
+                    raise ValueError("invalid_collection_row")
+            for path in [params["path"]] + [path for row in rows for path in row]:
+                if re.search(r"~(?![01])", path):
+                    raise ValueError("invalid_pointer")
+            if source == "CONTRACT":
+                raise ValueError("business_condition_requires_user_basis")
         elif predicate == "required_fields_present":
             if (
                 set(params) != {"fields"}
@@ -402,7 +415,9 @@ def validate_exchange(catalog, exchange, expectations):
         )
         observed = None
         details = {}
-        if complete:
+        from .selection_scope import scope_result
+        selection = scope_result(expectation, exchange)
+        if complete and (selection is None or selection['applicable']):
             if predicate == "status_in":
                 observed = response["status"] in params["values"]
             elif predicate == "content_type_is_json":
@@ -447,17 +462,44 @@ def validate_exchange(catalog, exchange, expectations):
                         "actual": None,
                         "actual_present": False,
                     }
+            elif predicate == "json_collection_matches":
+                try:
+                    collection = response["json"] if params["path"] == "" else pointer_get(response["json"], params["path"])
+                    matched = []
+                    if isinstance(collection, list):
+                        for template in params["rows"]:
+                            candidates = []
+                            for index, item in enumerate(collection):
+                                try:
+                                    if all(canonical(pointer_get(item, path)) == canonical(expected) for path, expected in template.items()):
+                                        candidates.append(index)
+                                except (KeyError, IndexError, TypeError):
+                                    pass
+                            matched.append(candidates)
+                    observed = isinstance(collection, list) and len(matched) == len(params["rows"]) and all(len(indices) == 1 for indices in matched) and len({indices[0] for indices in matched if len(indices) == 1}) == len(params["rows"])
+                    if params["mode"] == "exact":
+                        observed = observed and len(collection) == len(params["rows"])
+                    elif params["mode"] == "absent":
+                        observed = isinstance(collection, list) and len(matched) == len(params["rows"]) and all(not indices for indices in matched)
+                    details = {"path":params["path"], "expected":display_value(params["rows"]),
+                               "actual":{"unique_match_counts":[len(v) for v in matched],"collection_size":len(collection) if isinstance(collection,list) else None}, "actual_present":True}
+                except (KeyError, IndexError, TypeError):
+                    observed = False
+                    details = {"path":params["path"], "expected":display_value(params["rows"]), "actual":None,"actual_present":False}
         if (
             predicate
             in {
                 "required_fields_present",
                 "supported_schema_types",
                 "json_value_equals",
+                "json_collection_matches",
             }
             and complete
             and not response.get("json_valid", outcome == "received")
         ):
             observed = None
+        if selection is not None:
+            details['selection_scope'] = selection
         verdict = (
             "not_checked" if observed is None else ("pass" if observed else "fail")
         )
@@ -526,9 +568,21 @@ def report(run):
     здесь отсутствуют. Свободная цель не объявляется полностью формализованной.
     """
     result = deepcopy(run.get("validation") or {})
+    intent_exchange = result.get('exchange_id')
+    if run.get('chain_verdict') in {'pass','fail'} and any(
+        c.get('selection_scope',{}).get('applicable') is False for c in result.get('checks',[])):
+        from .selection_scope import applicable
+        matched = next((v for v in reversed(run.get('validations',[])) if applicable(v) and v['task_postcondition']),None)
+        if matched:
+            result.update(checks=deepcopy(matched['checks']),intent_verdict=run['chain_verdict'],task_postcondition=True)
+            intent_exchange = matched['exchange_id']
     if run.get("chain_verdict") == "fail":
         result["intent_verdict"] = "fail"
         result["task_postcondition"] = True
+    elif run.get('chain_verdict') == 'not_checked' and result.get('intent_verdict') == 'pass':
+        # Успешный login не завершает ещё не выполненную бизнес-цепочку.
+        result['intent_verdict'] = 'not_checked'
+        result['task_postcondition'] = False
     labels = {
         "pass": "соответствует",
         "fail": "не соответствует",
@@ -544,6 +598,10 @@ def report(run):
         + labels.get(result.get("intent_verdict"), "не проверено")
         + "."
     )
+    if run.get('stop_reason') == 'cancelled':
+        summary = 'Выполнение Run отменено. Результаты уже выполненных операций сохранены.'
+    elif run.get('stop_reason') == 'approval_rejected':
+        summary = 'Действие отменено: подтверждение отклонено. Ранее выполненные операции сохранены.'
     unverified = []
     if not result.get("task_postcondition"):
         unverified.append("Поддержанные условия проверки выполнены не полностью.")
@@ -621,8 +679,15 @@ def report(run):
             "recovery": "Явный новый Run после проверки причины; автоматического повторения действий нет.",
         }
     )
+    checks_verdict = {'pass': 'PASS', 'fail': 'FAIL'}.get(result.get('intent_verdict'), 'UNKNOWN')
+    goal_verdict = 'FAIL' if checks_verdict == 'FAIL' else 'PASS' if checks_verdict == 'PASS' and run['status'] == 'completed' and run.get('goal_coverage') == 'complete' else 'UNKNOWN'
     return {
         "summary": summary,
+        "checks_verdict": checks_verdict,
+        "goal_verdict": goal_verdict,
+        "goal_coverage": run.get('goal_coverage', 'partial'),
+        "intent_exchange_id": intent_exchange,
+        **({'summary_review':deepcopy(run['summary_review']['assessment'])} if 'summary_review' in run else {}),
         "goal": run["goal"],
         "goal_hash": run.get("goal_hash"),
         "execution_status": run["status"],

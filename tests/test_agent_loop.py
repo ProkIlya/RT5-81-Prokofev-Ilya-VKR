@@ -4,6 +4,7 @@ import json
 import sys
 import threading
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -256,7 +257,11 @@ class AgentLoopTests(unittest.TestCase):
         run["exchanges"].clear()
         again = app.start("p", "s", "m", "Check pet", model, checks_only=True)
         self.assertEqual(len(again["exchanges"]), 1)
-        self.assertEqual(payloads[0]["tools"], payloads[1]["tools"])
+        scoped_tools = deepcopy(payloads[1]["tools"])
+        finish = next(t for t in scoped_tools if t['function']['name']=='finish_run')
+        choices = finish['function']['parameters']['properties']['evidence_ids']['items'].pop('enum')
+        self.assertEqual(choices, [again['exchanges'][0]['id']])
+        self.assertEqual(payloads[0]["tools"], scoped_tools)
         self.assertEqual(
             payloads[1]["messages"][: len(payloads[0]["messages"])],
             payloads[0]["messages"],

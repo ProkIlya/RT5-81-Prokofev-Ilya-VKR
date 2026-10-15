@@ -85,7 +85,7 @@ class DiscoveryTests(unittest.TestCase):
         wf = CatalogWorkflow(
             cat,
             cfg,
-            goal="Найди и проверь питомца Мурку. Ничего не изменяй.",
+            goal="Найди объект Мурку. Ничего не изменяй.",
             conditions={"z_pet_observation": [status_condition(200)]},
         )
         return cat, cfg, wf
@@ -137,6 +137,7 @@ class DiscoveryTests(unittest.TestCase):
                 "inspect_operation",
                 "execute_operation",
                 "finish_run",
+                "read_response",
             },
         )
         self.assertNotIn(

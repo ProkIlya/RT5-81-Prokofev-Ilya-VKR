@@ -13,6 +13,22 @@ from agent_support import ObserverModel, count_test_tokens
 
 
 class AgentCliTests(unittest.TestCase):
+    def test_cli_delivers_same_message_after_restart_without_new_http(self):
+        from api_agent.agent.__main__ import main
+        with DemoServer() as demo, tempfile.TemporaryDirectory() as directory:
+            arguments = ["--target", demo.target, "--spec", str(ROOT / "tests/fixtures/demo_openapi.json"),
+                         "--evidence-dir", directory, "--history-db", str(Path(directory) / "history.sqlite3"),
+                         "--project-id", "p", "--session-id", "s", "--message-id", "m", "Check pet"]
+            try:
+                code = main(arguments, model=ObserverModel(), token_counter=count_test_tokens)
+            except SystemExit as error:
+                self.fail("CLI не поддерживает постоянную команду: " + str(error))
+            self.assertEqual(code, 0)
+            def forbidden(payload):
+                self.fail("CLI повторно вызвал модель")
+            self.assertEqual(main(arguments, model=forbidden, token_counter=count_test_tokens), 0)
+            self.assertEqual(len(demo.journal), 1)
+
     def test_goal_runs_and_persists_trace(self):
         from api_agent.agent.__main__ import main
 

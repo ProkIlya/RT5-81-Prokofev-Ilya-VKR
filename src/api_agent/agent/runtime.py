@@ -1,11 +1,11 @@
 """Адаптивный цикл с детерминированными правами и наблюдаемой остановкой.
 
-LLM не создаёт Run, не выбирает target и не назначает verdict. До SQLite
-исходные сообщения и запуски принадлежат одному экземпляру StartAgentRun.
-После перезапуска процесса дедупликация не гарантируется: это граница S08.
+LLM не создаёт Run, не выбирает target и не назначает verdict. SQLiteHistory
+обеспечивает дедупликацию после рестарта; без него действует in-memory режим.
 """
 
 from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import dataclass
 import hashlib
 import json
@@ -176,6 +176,10 @@ class StartAgentRun:
         event_sink=None,
         secrets=(),
         clock=time.monotonic,
+        history_store=None,
+        environment="default",
+        model_name="MiniCPM5-2B-Q4_K_M",
+        summary_reviewer=None,
     ):
         self.target, _ = loopback_origin(target)
         self.catalog = catalog
@@ -218,6 +222,12 @@ class StartAgentRun:
         self.secrets = tuple(sorted(secrets, key=len, reverse=True))
         self._active_state = None
         self.clock = clock
+        self.history_store = history_store
+        self.environment = environment
+        if not isinstance(model_name, str) or not model_name.strip() or len(model_name) > 200:
+            raise ValueError("invalid_model_identity")
+        self.model_name = model_name
+        self.summary_reviewer = summary_reviewer
         self._runs = {}
         self._lock = threading.Lock()
 
@@ -273,6 +283,7 @@ class StartAgentRun:
         cancel=None,
         conditions=None,
         checks_only=False,
+        parent_run_id=None,
     ):
         """Принять команду приложения; идентичный message_id возвращает снимок Run.
 
@@ -284,7 +295,12 @@ class StartAgentRun:
         for value in (project_id, session_id, message_id, goal):
             if not isinstance(value, str) or not value.strip() or len(value) > 2000:
                 raise ValueError("invalid command")
-        with self._lock:
+        lease = self.history_store.execution() if self.history_store else nullcontext()
+        with self._lock, lease:
+            if self.history_store:
+                previous = self.history_store.lookup(project_id, session_id, message_id)
+                if previous is not None:
+                    return previous
             if message_id in self._runs:
                 entry = self._runs[message_id]
                 if entry["scope"] != (project_id, session_id):
@@ -296,12 +312,13 @@ class StartAgentRun:
                 "session_id": session_id,
                 "message_id": message_id,
                 "goal": goal,
+                "goal_coverage": getattr(self.workflow, "goal_coverage", "partial"),
                 "target": self.target,
                 "contract": self.catalog.snapshot,
                 "spec_hash": self.catalog.spec_hash,
                 "operation_hash": self.operation_hash,
                 "model": {
-                    "name": "MiniCPM5-2B-Q4_K_M",
+                    "name": self.model_name,
                     "sampling": {
                         "temperature": 0.0,
                         "top_p": 0.95,
@@ -330,12 +347,14 @@ class StartAgentRun:
                 "resources": TokenBudget(self.limits, None).snapshot(),
                 "goal_hash": fingerprint(self.safe(goal)),
                 "final": None,
+                **({"parent_run_id": parent_run_id} if parent_run_id else {}),
             }
-            if self.workflow:
-                run["model"]["request_options"] = {
-                    "parallel_tool_calls": False,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                }
+            # Один режим генерации для всех циклов: скрытый thinking иначе
+            # расходует бюджет ответа до появления native tool call.
+            run["model"]["request_options"] = {
+                "parallel_tool_calls": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
             # Снимок и hashes должны описывать одно доступное основание. Маска
             # literal enum, имени поля или pointer меняет контракт, поэтому
             # redaction не может служить его каноническим преобразованием.
@@ -372,7 +391,6 @@ class StartAgentRun:
             # разные исходные ID могут иметь одинаковое отображение. Scope
             # никогда не передаётся в sink, prompt, исключения или public return.
             entry = {"scope": (project_id, session_id), "run": self.safe(run)}
-            self._runs[message_id] = entry
             # Узкий S05 распознаёт только известную цель проверки getPet.
             # Явные нормализованные conditions или checks_only — доверенная
             # команда UI/application, не полномочие модели переименовать цель.
@@ -419,7 +437,46 @@ class StartAgentRun:
                     prepared = []
             else:
                 prepared = []
+            if self.history_store:
+                configuration = (
+                    self.workflow.config.snapshot
+                    if self.workflow and hasattr(self.workflow, "config")
+                    else {"version": 1, "spec_hash": self.catalog.spec_hash,
+                          "operations": {self.initial_operation: {"operation_hash": self.operation_hash, "risk": "A"}}}
+                )
+                if configuration.get("project_id", project_id) != project_id:
+                    raise ValueError("foreign_project_configuration")
+                metadata = {
+                    "extraction": getattr(self.workflow, "extraction", {}),
+                    "binding_rules": getattr(self.workflow, "binding_rules", {}),
+                    "selection_scopes": getattr(self.workflow, "selection_scopes", {}),
+                }
+                auth = getattr(self.workflow, "auth", None)
+                if auth:
+                    metadata["auth"] = {k: auth[k] for k in ("login_operation", "token_path")}
+                    metadata["auth"]["public_body_fields"] = list(auth.get("public_body_fields", []))
+                previous = self.history_store.begin_run(
+                    project_id, session_id, message_id, self.safe(run),
+                    environment=self.environment,
+                    configuration=self.safe(configuration), metadata=self.safe(metadata),
+                )
+                if previous is not None:
+                    return previous
+            # Команда считается принятой после атомарной durable регистрации.
+            # Ошибка INSERT не должна оставлять ложный Run в in-memory dedup.
+            self._runs[message_id] = entry
             result = self._loop(run, model, cancel or threading.Event(), prepared)
+            if self.history_store:
+                result["response_message_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "answer:" + result["run_id"]))
+                try:
+                    self.history_store.finalize(project_id, session_id, message_id, self.safe(result))
+                except Exception:
+                    result.update(status="failed", stop_reason="storage_error")
+                    result["report"] = self.safe(report(result))
+                else:
+                    # Durable ответ уже создан: экспорт показывает ту же связь,
+                    # не переписывая immutable finalized snapshot в SQLite.
+                    self.trace_sink(self.safe(result))
             entry["run"] = self.safe(result)
             return deepcopy(entry["run"])
 
@@ -486,8 +543,25 @@ class StartAgentRun:
             run["stop_category"] = stop_category(run)
             run["resources"]["wall_seconds"] = run["wall_seconds"]
             run["report"] = self.safe(report(run))
+            if self.summary_reviewer is not None:
+                # Новый контекст без API tools; тот же deadline и total budget.
+                # Диагноз LLM не получает права переписать validation/вердикт.
+                reviewed = self.summary_reviewer.review(
+                    self.safe(run), self.limits, self.token_counter or getattr(model, 'count_tokens', None),
+                    started + self.limits.max_seconds,
+                )
+                run['summary_review'] = self.safe(reviewed)
+                run['agent_model_calls'] = run['model_calls']
+                run['review_model_calls'] = reviewed['calls']
+                run['model_calls'] += reviewed['calls']
+                if 'resources' in reviewed:
+                    run['resources'] = reviewed['resources']
+                run['wall_seconds'] = self.clock() - started
+                run['resources']['wall_seconds'] = run['wall_seconds']
+                run['report'] = self.safe(report(run))
+                self._emit(run, 'summary_review', {'status':reviewed['assessment']['status'],'calls':reviewed['calls']})
             try:
-                self.trace_sink(deepcopy(self.safe(run)))
+                self._persist_snapshot(run)
             except Exception:
                 run.update(status="failed", stop_reason="trace_error")
             run["stop_category"] = stop_category(run)
@@ -499,7 +573,7 @@ class StartAgentRun:
             run["stop_category"] = stop_category(run)
             run["report"] = self.safe(report(run))
             try:
-                self.trace_sink(deepcopy(self.safe(run)))
+                self._persist_snapshot(run)
             except Exception:
                 run.update(status="failed", stop_reason="trace_error")
                 # Последний отказ sink также виден в доступном JSONL. Повтор
@@ -517,6 +591,13 @@ class StartAgentRun:
             self._active_state = None
         return run
 
+    def _persist_snapshot(self, run):
+        """Отказ любой durable записи останавливает следующий внешний эффект."""
+        snapshot = deepcopy(self.safe(run))
+        if self.history_store:
+            self.history_store.save_snapshot(snapshot)
+        self.trace_sink(snapshot)
+
     def _emit(self, run, kind, details):
         """Сначала durable sink, затем in-memory журнал; ошибка запрещает HTTP."""
         event = self.safe(event_record(run, kind, details))
@@ -528,6 +609,8 @@ class StartAgentRun:
                 self.workflow, "prompt_version", "runtime-chain-v1"
             )
         try:
+            if self.history_store:
+                self.history_store.append_event(deepcopy(event))
             if self.event_sink is not None:
                 self.event_sink(deepcopy(event))
             run["events"].append(event)
@@ -573,7 +656,8 @@ class StartAgentRun:
                     [
                         {
                             k: e[k]
-                            for k in ("source", "predicate", "parameters", "intent")
+                            for k in ("source", "predicate", "parameters", "intent", "selection_scope")
+                            if k in e
                         }
                         for e in (
                             self.workflow.prompt_checks(run["expectations"])
@@ -598,7 +682,8 @@ class StartAgentRun:
                     ),
                 }
             )
-        prefix_hash = fingerprint({"system": history[0], "tools": registry})
+        if self.workflow and hasattr(self.workflow, "run_registry"):
+            registry = self.workflow.run_registry(run, registry)
         run["history"] = history
         counter = self.token_counter or getattr(model, "count_tokens", None)
         budget = TokenBudget(self.limits, counter)
@@ -698,7 +783,7 @@ class StartAgentRun:
                     not check_fields <= set(check)
                     or set(check)
                     - check_fields
-                    - {"path", "expected", "actual", "actual_present"}
+                    - {"path", "expected", "actual", "actual_present", "selection_scope"}
                     or canonical({k: check[k] for k in identity}) != canonical(identity)
                     or check["verdict"]
                     not in {
@@ -763,7 +848,7 @@ class StartAgentRun:
 
         def persist():
             try:
-                self.trace_sink(deepcopy(self.safe(run)))
+                self._persist_snapshot(run)
                 return True
             except Exception:
                 stop("trace_error", "failed")
@@ -807,17 +892,24 @@ class StartAgentRun:
                 "model": run["model"]["name"],
                 "messages": build_window(history),
                 "tools": deepcopy(registry),
-                "tool_choice": "required",
-                **(
-                    {
-                        "parallel_tool_calls": False,
-                        "chat_template_kwargs": {"enable_thinking": False},
-                    }
-                    if self.workflow
-                    else {}
-                ),
+                "tool_choice": self.workflow.next_tool(run) if self.workflow and hasattr(self.workflow, "next_tool") else "required",
+                **run["model"]["request_options"],
                 **run["model"]["sampling"],
             }
+            if self.workflow and hasattr(self.workflow, "phase_registry"):
+                payload["tools"] = self.workflow.phase_registry(run, payload["tools"])
+            # UUID нельзя надёжно переписывать малой моделью как свободный
+            # текст. Native grammar предлагает только уже наблюдённые ID;
+            # session всё равно проверяет scope и полноту evidence.
+            if run["exchanges"]:
+                for tool in payload["tools"]:
+                    if tool["function"]["name"] == "finish_run":
+                        evidence = tool["function"]["parameters"]["properties"]["evidence_ids"]
+                        # Базовые schemas могут разделять один scalar object
+                        # с credential_ref: enum относится только к evidence.
+                        evidence["items"] = {**deepcopy(evidence["items"]), "enum": [e["id"] for e in run["exchanges"]]}
+            if hasattr(model, "prepare_payload"):
+                payload = model.prepare_payload(payload)
             prompt_bytes = len(canonical(payload))
             if prompt_bytes > self.limits.max_prompt_bytes:
                 stop("prompt_limit")
@@ -858,7 +950,10 @@ class StartAgentRun:
                 "index": run["model_calls"],
                 "action": None,
                 "observation": None,
-                "prefix_hash": prefix_hash,
+                "prefix_hash": fingerprint({"system": history[0], "tools": payload["tools"]}),
+                "offered_tools": [t["function"]["name"] for t in payload["tools"]],
+                "tool_choice": deepcopy(payload["tool_choice"]),
+                "phase_hint": deepcopy(payload["messages"][-1]) if payload["messages"] != build_window(history) else None,
                 "window_hash": fingerprint(payload),
                 "prompt_bytes": prompt_bytes,
                 "input_tokens_preflight": input_tokens,
@@ -931,6 +1026,15 @@ class StartAgentRun:
                     stop("token_limit")
                     break
                 call, action = self._decision(response)
+                offered = next((tool for tool in payload["tools"] if tool["function"]["name"] == action["name"]), None)
+                if offered is None:
+                    raise ToolArgumentsError("Tool is not offered in this Run. Use the shown operations and available tools; do not repeat a redundant search.")
+                if schema_issues(action["arguments"], offered["function"]["parameters"]):
+                    if action['name'] == 'execute_operation':
+                        properties = offered['function']['parameters']['properties']
+                        hint = {key: value.get('enum', list(value.get('properties', {}))) for key, value in properties.items()}
+                        raise ToolArgumentsError('Use the offered operation and exact input fields: ' + json.dumps(hint, separators=(',', ':')) + '. body=requestBody, parameters=path/query, bindings=issued value refs, credential_ref=issued auth ref. Prerequisites may require login first. Never invent refs.')
+                    raise ToolArgumentsError("Arguments must match the offered tool schema. Choose evidence_ids exactly from its enum; never rewrite an ID.")
                 run["empty_consecutive"] = 0
                 step["decision_kind"] = "native_call"
                 step["action"] = self.safe(action)
@@ -972,7 +1076,7 @@ class StartAgentRun:
                     )
                     stop(
                         "finished",
-                        "completed" if validation["task_postcondition"] else "partial",
+                        "completed" if validation["task_postcondition"] or run.get('chain_verdict') in {'pass','fail'} else "partial",
                     )
                     run["final"] = self.safe(
                         {**final, "summary": report(run)["summary"]}
@@ -990,6 +1094,9 @@ class StartAgentRun:
                     result = tool_result(
                         observation, provenance={"source": "RUN_CATALOG"}
                     )
+                elif name == "read_response" and self.workflow and hasattr(self.workflow, "read_response"):
+                    observation = self.workflow.read_response(session, args)
+                    result = tool_result(observation, evidence_ids=[args["exchange_id"]], provenance={"source": "HTTP_EXCHANGE", "run_id": run["run_id"]})
                 elif name == "inspect_operation":
                     inspected_id = args["operation_id"]
                     operation = self.catalog.operations[inspected_id]

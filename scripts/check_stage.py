@@ -119,6 +119,13 @@ def post_stream(payload):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] in ("S08", "S08a", "S08b") and sys.argv[2] in ("good", "bad"):
+        from scripts.check_history import main as history_main
+        mode = sys.argv[2]
+        expected = 0 if mode == "good" else 2
+        parts = "ab" if sys.argv[1] == "S08" else sys.argv[1][-1]
+        codes = {part: history_main(part, mode) for part in parts}
+        return expected if all(code == expected for code in codes.values()) else 1
     if len(sys.argv) == 3 and sys.argv[1] == "S07" and sys.argv[2] in ("good", "bad"):
         from scripts.check_policy import main as policy_main
         from scripts.check_catalog import main as catalog_main
@@ -236,7 +243,7 @@ def main():
         return s02_main(sys.argv[2])
     if len(sys.argv) != 3 or sys.argv[1] != "S01" or sys.argv[2] not in ("good", "bad"):
         print(
-            "usage: python scripts/check_stage.py S01|S02|S03|S04|S05|S06[a|b]|S07[a|b|c|d] good|bad",
+            "usage: python scripts/check_stage.py S01|S02|S03|S04|S05|S06[a|b]|S07[a|b|c|d]|S08[a|b] good|bad",
             file=sys.stderr,
         )
         return 1

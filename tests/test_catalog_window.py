@@ -11,12 +11,13 @@ import test_catalog_discovery as support
 class WindowTests(unittest.TestCase):
     def test_declared_larger_window_preserves_cards_that_fit_actual_preflight(self):
         cat, cfg, wf = support.DiscoveryTests().workflow("http://127.0.0.1:18080")
+        wf.goal = "item000"
         run = {
             "run_id": "experimental",
             "limits": {"max_context_tokens": 8192, "max_output_tokens": 512},
         }
         wf.initial_context(run, lambda payload: 1900)
-        self.assertEqual(len(run["selection_manifest"]["selected_ids"]), 2)
+        self.assertEqual(run["selection_manifest"]["selected_ids"], ["item000"])
         self.assertEqual(run["selection_manifest"]["max_context_tokens"], 8192)
 
 

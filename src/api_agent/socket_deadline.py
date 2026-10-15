@@ -17,24 +17,39 @@ class SocketDeadline:
         self.deadline = deadline
         self.expired = False
         self.timer = None
+        self._lock = threading.Lock()
+        self._closed = False
 
     def __enter__(self):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("network deadline exhausted")
+        with self._lock:
+            self._arm(remaining)
+        return self
+
+    def _arm(self, remaining):
+        # Вызывается под lock: выход и перевзвод не теряют текущий таймер.
         self.timer = threading.Timer(remaining, self._interrupt)
         self.timer.daemon = True
         self.timer.start()
-        return self
 
     def _interrupt(self):
-        # shutdown пробуждает recv/readline даже при потоке частых маленьких
-        # пакетов. Основной поток затем переводит обмен в time_limit.
-        self.expired = True
-        try:
-            self.connection_socket.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+        with self._lock:
+            if self._closed or self.expired:
+                return
+            # Пробуждение Timer само по себе не доказывает истечение срока:
+            # системное ожидание может завершиться раньше monotonic deadline.
+            remaining = self.deadline - time.monotonic()
+            if remaining > 0:
+                self._arm(remaining)
+                return
+            # shutdown пробуждает recv/readline даже при частых малых пакетах.
+            self.expired = True
+            try:
+                self.connection_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def check(self):
         """Не принимать ответ, если срок истёк на границе сетевой операции."""
@@ -42,7 +57,9 @@ class SocketDeadline:
             raise TimeoutError("network deadline exhausted")
 
     def __exit__(self, *args):
-        # После выхода таймер не должен закрыть уже переданный следующему
-        # действию дескриптор. join исключает гонку cancel с _interrupt.
-        self.timer.cancel()
-        self.timer.join()
+        # Запрещаем перевзвод до cancel; join вне lock позволяет callback выйти.
+        with self._lock:
+            self._closed = True
+            timer = self.timer
+            timer.cancel()
+        timer.join()

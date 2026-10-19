@@ -78,13 +78,19 @@ def _validate_extraction(catalog, operation, status, path, kind, *, secret=False
         raise ValueError("invalid_extraction_schema")
 
 
+class RequestLimitExceeded(PolicyDenied):
+    """Исчерпание ресурса останавливает Run без коррекции аргументов модели."""
+
+    stop_reason = "request_limit"
+
+
 @dataclass(frozen=True)
 class ChainLimits:
-    """Конечный бюджет короткой цепочки; контекст runtime не увеличивается."""
+    """Конечные пользовательские бюджеты; контекст runtime не увеличивается."""
 
     max_output_tokens: int = 512
-    max_steps: int = 8
-    max_requests: int = 3
+    max_steps: int = 24
+    max_requests: int = 10
     max_seconds: float = 180
     malformed_retries: int = 1
     max_prompt_bytes: int = 16000
@@ -108,7 +114,6 @@ class ChainLimits:
                     "max_repeats",
                 )
             )
-            or not 1 <= self.max_requests <= 4
             or type(self.max_seconds) not in (int, float)
             or not math.isfinite(self.max_seconds)
             or self.max_seconds <= 0
@@ -540,7 +545,7 @@ class ChainSession:
         if self.uncertain:
             raise PolicyDenied("uncertain_write")
         if self.requests >= self.max_requests:
-            raise PolicyDenied("request_limit")
+            raise RequestLimitExceeded("request_limit")
         op_id = args["operation_id"]
         op = self.catalog.operations[op_id]
         path = op["path"]

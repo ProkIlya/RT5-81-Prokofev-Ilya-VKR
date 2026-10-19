@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode
 from ..bounded_json import validate_tree
 from ..policy import ProjectConfig, PolicySession, decision
 from ..validation import prepare_expectations, schema_issues, fingerprint, display_value
-from ..agent.chains import _validate_extraction, ChainLimits
+from ..agent.chains import _validate_extraction, ChainLimits, RequestLimitExceeded
 
 
 @dataclass(frozen=True)
@@ -923,7 +923,7 @@ class CatalogSession(PolicySession):
 
             raise PolicyStop("uncertain_write")
         if self.requests >= self.max_requests:
-            raise ValueError("request_limit")
+            raise RequestLimitExceeded("request_limit")
         self.workflow.decision("execute_operation", args)
         name = args["operation_id"]
         op = self.catalog.operations[name]

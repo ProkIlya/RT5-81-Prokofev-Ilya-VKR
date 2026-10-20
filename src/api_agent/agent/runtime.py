@@ -486,6 +486,8 @@ class StartAgentRun:
                 if auth:
                     metadata["auth"] = {k: auth[k] for k in ("login_operation", "token_path")}
                     metadata["auth"]["public_body_fields"] = list(auth.get("public_body_fields", []))
+                if hasattr(self.workflow, 'storage_metadata'):
+                    metadata = self.workflow.storage_metadata()
                 previous = self.history_store.begin_run(
                     project_id, session_id, message_id, self._safe_run(run),
                     environment=self.environment,
@@ -521,7 +523,7 @@ class StartAgentRun:
         На аварийном выходе берём эти счётчики, а не начальный снимок команды.
         Отказ redaction сохраняет лишь собственные безопасные metadata, без body.
         """
-        started = self.clock()
+        started = self.clock() - getattr(self.workflow, 'preparation_active', 0)
         from .chains import ChainSession
 
         session = (
@@ -574,6 +576,11 @@ class StartAgentRun:
                             }
                         )
             run["wall_seconds"] = self.clock() - started
+            if getattr(self.workflow, 'human', None) is not None:
+                run['human_wait_seconds'] = self.workflow.human.waited_seconds
+                run['elapsed_wall_seconds'] = run['wall_seconds'] + run['human_wait_seconds']
+                run['human_events'] = self.workflow.human.public_events()
+                run['total_model_calls'] = run['model_calls'] + run.get('preparation', {}).get('generator_calls', 0) + run.get('preparation', {}).get('metadata_calls', 0)
             self._preserve_safety(run, session)
             if not run["stop_reason"]:
                 run["stop_reason"] = "runtime_error"
@@ -754,7 +761,7 @@ class StartAgentRun:
             registry = self.workflow.run_registry(run, registry)
         run["history"] = history
         counter = self.token_counter or getattr(model, "count_tokens", None)
-        budget = TokenBudget(self.limits, counter)
+        budget = getattr(self.workflow, 'preparation_budget', None) or TokenBudget(self.limits, counter)
         run["resources"] = budget.snapshot()
         seen, repeats = set(), {}
         expectations_hash = fingerprint(run["expectations"])
@@ -1044,6 +1051,8 @@ class StartAgentRun:
             if not emit("model_requested") or not persist() or not guard():
                 break
             try:
+                if hasattr(model, 'set_deadline'):
+                    model.set_deadline(session.deadline)
                 response = model(deepcopy(payload))
             except Exception as error:
                 budget.unknown = True
@@ -1174,6 +1183,9 @@ class StartAgentRun:
                     result = tool_result(
                         observation, provenance={"source": "RUN_CATALOG"}
                     )
+                elif self.workflow and name in getattr(self.workflow, 'application_tools', ()):
+                    observation = self.workflow.handle_tool(session, name, args)
+                    result = tool_result(observation, provenance={'source': 'APPLICATION', 'run_id': run['run_id']})
                 elif name == "read_response" and self.workflow and hasattr(self.workflow, "read_response"):
                     observation = self.workflow.read_response(session, args)
                     result = tool_result(observation, evidence_ids=[args["exchange_id"]], provenance={"source": "HTTP_EXCHANGE", "run_id": run["run_id"]})

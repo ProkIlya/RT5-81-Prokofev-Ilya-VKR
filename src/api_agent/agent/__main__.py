@@ -18,10 +18,13 @@ from .resilience import JsonlJournal
 from ..openapi import load_source
 
 
-def main(argv=None, *, model=None, token_counter=None):
+def main(argv=None, *, model=None, token_counter=None, human_reader=None):
     """Передать команду StartAgentRun и показать безопасный итог без нового HTTP."""
     parser = argparse.ArgumentParser(description="Run restricted local API agent")
     parser.add_argument("goal")
+    parser.add_argument('--generate-goal', action='store_true', help='S09b: one generator, compiler and explicit semantic acceptance')
+    parser.add_argument('--confirm-goal', action='store_true', help='Confirm every generated interpretation')
+    parser.add_argument('--human-timeout', type=float, default=120, help='Human response timeout, separate from active Run time')
     parser.add_argument("--workflow", choices=("create-read", "auth-read"))
     parser.add_argument(
         "--credentials-file",
@@ -80,6 +83,11 @@ def main(argv=None, *, model=None, token_counter=None):
             path.write_text(
                 json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+
+        if args.generate_goal:
+            from ..goal_cli import run_goal_cli
+            return run_goal_cli(args, catalog, directory, sink, model=model, token_counter=token_counter,
+                                cancel=cancel, reader=human_reader)
 
         from .chains import CreateRead, AuthRead
 

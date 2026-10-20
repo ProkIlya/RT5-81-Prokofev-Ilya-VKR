@@ -716,7 +716,19 @@ def report(run):
     )
     checks_verdict = {'pass': 'PASS', 'fail': 'FAIL'}.get(result.get('intent_verdict'), 'UNKNOWN')
     goal_verdict = 'FAIL' if checks_verdict == 'FAIL' else 'PASS' if checks_verdict == 'PASS' and run['status'] == 'completed' and run.get('goal_coverage') == 'complete' else 'UNKNOWN'
+    goal_checklist = None
+    goal_contract = (run.get('admission_manifest') or {}).get('goal_contract')
+    if goal_contract:
+        from ..goals import AcceptedGoal, check_goal
+        from ..openapi.parser import Catalog
+        accepted = AcceptedGoal(canonical(goal_contract['manifest']))
+        if accepted.hash != goal_contract['manifest_hash']:
+            raise ValueError('goal_manifest_changed')
+        goal_checklist = check_goal(accepted, Catalog(canonical(run['contract'])), run)
+        goal_verdict = ('FAIL' if checks_verdict == 'FAIL' or goal_checklist['verdict'] == 'FAIL' else
+                        'PASS' if run['status'] == 'completed' and goal_checklist['verdict'] == 'PASS' else 'UNKNOWN')
     return {
+        **({'goal_checklist': goal_checklist} if goal_checklist is not None else {}),
         "summary": summary,
         "checks_verdict": checks_verdict,
         "goal_verdict": goal_verdict,

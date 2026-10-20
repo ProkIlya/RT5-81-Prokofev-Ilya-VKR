@@ -267,7 +267,10 @@ class PolicySession(ChainSession):
                     raise PolicyStop("stale_approval")
             self._approved.add(proof)
         principal = getattr(self, '_request_principal', None)
-        if principal is not None and (principal['auth_epoch'] != self.state.auth_epoch or
+        explicit_old = (principal is not None and principal['mode'] == 'old_epoch'
+                        and hasattr(self.workflow, 'old_epoch_allowed')
+                        and self.workflow.old_epoch_allowed(self, args, principal))
+        if principal is not None and ((principal['auth_epoch'] != self.state.auth_epoch and not explicit_old) or
             (principal['mode'] == 'authenticated' and principal['actor'] != self.state.principal)):
             raise PolicyStop('stale_auth_epoch')
         if getattr(self, "cancel", None) is not None and self.cancel.is_set():

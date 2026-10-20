@@ -159,7 +159,10 @@ def verify_fact(run, snapshot, descriptor, stamp, policy):
                 raise ValueError('fact_identity_mismatch')
             binding = snapshot['metadata'].get('binding_rules', {}).get(operation, {}).get(parameter)
             extraction = snapshot['metadata'].get('extraction', {}).get(created['operation_id'], {}).get(verify['create_id_path'])
-            if binding != {'source_operation': created['operation_id'], 'source_path': verify['create_id_path']} or not extraction or extraction.get('secret'):
+            expected_binding = {'source_operation': created['operation_id'], 'source_path': verify['create_id_path']}
+            if binding and 'source_occurrence' in binding:
+                expected_binding['source_occurrence'] = created.get('occurrence_id')
+            if binding != expected_binding or not extraction or extraction.get('secret'):
                 raise ValueError('fact_untrusted_binding')
             if read.get('request_parameters', {}).get(parameter) != identifier:
                 raise ValueError('fact_identity_mismatch')

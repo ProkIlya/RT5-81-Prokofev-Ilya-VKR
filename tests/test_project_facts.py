@@ -221,7 +221,7 @@ class ProjectFactTests(unittest.TestCase):
             self.start(history)
             self.assertTrue(history.read_facts('p', catalog=self.catalog))
         with closing(sqlite3.connect(self.path)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertGreaterEqual(db.execute('PRAGMA user_version').fetchone()[0], 2)
 
     def name_condition(self, message, name):
         return [{'source': 'USER_DEFINED', 'predicate': 'json_value_equals',

@@ -23,6 +23,7 @@ class DemoServer:
         self.pet = {"id": 1, "name": "Murka"}
         self.auth_token = secrets.token_urlsafe(32)
         self.user_id = secrets.randbelow(1000000000) + 1000000
+        self.accounts = {'fixture': {'password': 'fixture-password', 'id': self.user_id}}
         self.orders = {}
         self._data_lock = threading.Lock()
         self.connections = 0
@@ -52,6 +53,22 @@ class DemoServer:
                     pass
 
             def do_POST(self):
+                if self.path == '/users/register':
+                    try:
+                        length = int(self.headers.get('Content-Length', '0'))
+                        if not 1 <= length <= 2048: raise ValueError()
+                        data = json.loads(self.rfile.read(length))
+                        if set(data) != {'login', 'password'} or any(not isinstance(v, str) or not v for v in data.values()): raise ValueError()
+                    except (ValueError, TypeError):
+                        self.send_json(400, {'error': 'invalid_body'}); return
+                    with owner._data_lock:
+                        occupied = data['login'] in owner.accounts
+                        owner.journal.append({'method': 'POST', 'path': self.path, 'occupied': occupied})
+                        if not occupied:
+                            identifier = secrets.randbelow(1000000000) + 1000000
+                            owner.accounts[data['login']] = {'password': data['password'], 'id': identifier}
+                    self.send_json(409 if occupied else 201, {'error': 'login_exists'} if occupied else {'id': identifier, 'login': data['login']})
+                    return
                 if self.path == '/users/logout':
                     matched = self.headers.get('Authorization') == 'Bearer ' + owner.auth_token
                     owner.journal.append({'method': 'POST', 'path': self.path, 'auth_matched': matched})
@@ -65,10 +82,9 @@ class DemoServer:
                         if not 1 <= length <= 2048:
                             raise ValueError()
                         data = json.loads(self.rfile.read(length))
-                        valid = data == {
-                            "login": "fixture",
-                            "password": "fixture-password",
-                        }
+                        account = owner.accounts.get(data.get('login')) if isinstance(data, dict) else None
+                        valid = account is not None and set(data) == {'login', 'password'} and data['password'] == account['password']
+                        if valid: owner.user_id = account['id']
                     except (ValueError, TypeError):
                         valid = False
                     owner.journal.append({"method": "POST", "path": self.path})
@@ -194,6 +210,7 @@ class DemoServer:
             self.orders.clear()
             self.auth_token = secrets.token_urlsafe(32)
             self.user_id = secrets.randbelow(1000000000) + 1000000
+            self.accounts = {'fixture': {'password': 'fixture-password', 'id': self.user_id}}
         self.journal.clear()
         self.connections = 0
         self.mode = "good"

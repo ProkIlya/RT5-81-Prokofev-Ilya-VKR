@@ -190,3 +190,22 @@ with SQLiteHistory("history.sqlite3", read_only=True) as history:
 Минимальный create/read validator поддерживает явное публичное extraction/binding, один path ID и поля create body на тех же путях корневого read object. Он проверяет фактический URL, request parameter, response ID, содержимое и schemas двух exchanges одного Run. Числовой ID не записывается как долговременное значение связи. Неподдержанные формы не получают VERIFIED. Общий поиск исторических сущностей, передача фактов модели и полный сценарий STAND-34 относятся к последующим срезам S09; S09a предоставляет проверяемый application/storage API.
 
 Проверки: `python scripts/check_stage.py S09a good` (0), `python scripts/check_stage.py S09a bad` (2 при обнаруженных нарушениях; подготовка/сбой проверки — 1). Evidence сохраняется в `evidence/S09/`; технические проверки используют controlled model и настоящий Demo HTTP/SQLite, не являются полной серией STAND-37.
+
+## S09b: цель, принятые условия и вопросы
+
+Режим `--generate-goal` принимает русскую цель без ручного `--goal-checks`. Приложение ограниченно изучает метаданные разрешённых операций, один раз вызывает generator и проверяет предложение compiler. До HTTP пользователь принимает интерпретацию с условиями и обязательными полями ответа. Автоматически принимается только независимо проверяемая форма `Проверь <operationId>: статус <код>.` для одного анонимного GET без параметров. `--confirm-goal` требует принятия и для этой формы.
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m api_agent.agent 'Покажи имя питомца и проверь доступность сведений.' --generate-goal --target http://127.0.0.1:18082 --spec tests/fixtures/demo_openapi.json --project-config config/project.json --history-db evidence/agent/history.sqlite3 --session-id goal-session --message-id goal-001
+python scripts/check_stage.py S09b good
+python scripts/check_stage.py S09b bad
+```
+
+Project config предварительно создаётся и одобряется через `api_agent.policy configure` для того же target/spec, как выше. Новый режим использует общие бюджеты каталога; generator/metadata и основная модель расходуют один токенный бюджет и активное время. `check_goal` читает собственные exchanges без сети и возвращает checklist; финальный verdict вычисляется приложением даже без вызова инструмента.
+
+На ответ человеку отведено 120 секунд (`--human-timeout`), ожидание учитывается отдельно. Лимиты вопросов — три до Run и три во время Run, подтверждения действий отдельно. Во время Run можно заполнить только заранее принятый typed input до связанного HTTP. Изменение смысла/ожиданий после HTTP требует нового message ID и `--parent-run-id`; исходный manifest сохраняется. Повтор того же message ID возвращает результат без повторного generator/HTTP, включая отклонённую подготовку. После unresolved/rejection нужна новая команда, автоматического второго generator нет.
+
+Приватные поля приложения задаются через `--runtime-mappings`: например, `{"private_bodies":{"register":{"password":{"private":"test-password"}}}}`. Здесь `register` — реальный operationId проекта; одна метка повторно использует введённое приватное значение, в том числе в `auth.body`. CLI запрашивает его через скрытый ввод. Bearer и control keys не передаются модели; приватные значения маскируются в SQLite, trace и публичных событиях. Разрешены ключи mappings `auth`, `extraction`, `binding_rules`, `private_bodies`; права задаёт только одобренный Project config.
+
+Закрытые проверки: статус, scalar equality, schema, коллекция в явно указанной области одного ответа, equality между связанными occurrences, числовой результат с округлением Decimal ROUND_HALF_UP до точности пользователя. Ожидаемый результат расчёта задаёт пользователь; формула не угадывается. Произвольный NL, вся пагинация и полный STAND-37 этим не гарантируются. S09c (диагност и коррекция текста), кодовый workspace, compaction и полное сравнение — следующие срезы.

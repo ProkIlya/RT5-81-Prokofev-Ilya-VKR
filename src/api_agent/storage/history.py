@@ -81,9 +81,17 @@ class SQLiteHistory:
 
     def _migrate(self):
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 2:
+        if version > 3:
             raise StorageError("unsupported_schema_version")
-        if version == 2 or (version == 1 and self.read_only):
+        if version == 3 or (version in (1, 2) and self.read_only):
+            return
+        if version == 2:
+            script = Path(__file__).with_name('preparations.sql').read_text(encoding='utf-8')
+            try:
+                self.db.executescript('BEGIN IMMEDIATE;\n' + script + '\nPRAGMA user_version=3;\nCOMMIT;')
+            except sqlite3.Error:
+                if self.db.in_transaction: self.db.execute('ROLLBACK')
+                raise StorageError('migration_failed') from None
             return
         if version == 1:
             script = Path(__file__).with_name('facts.sql').read_text(encoding='utf-8')
@@ -93,6 +101,7 @@ class SQLiteHistory:
                 if self.db.in_transaction:
                     self.db.execute('ROLLBACK')
                 raise StorageError('migration_failed') from None
+            self._migrate()
             return
         if self.read_only:
             raise StorageError("unsupported_schema_version")
@@ -144,6 +153,52 @@ class SQLiteHistory:
 
     def _scope(self, project, session):
         return _key(project), _key(project, session)
+
+    def goal_preparation(self, project, session, message, goal_hash):
+        row = self.db.execute('SELECT * FROM goal_preparations WHERE message_key=?', (_key(message),)).fetchone()
+        if row is None: return None
+        if (row['project_key'], row['session_key']) != self._scope(project, session):
+            raise ValueError('goal_preparation_scope_mismatch')
+        if row['goal_hash'] != goal_hash: raise ValueError('goal_message_changed')
+        return json.loads(row['payload'])
+
+    def begin_goal_preparation(self, project, session, message, payload):
+        """Ровно один caller получает право на первую генерацию команды."""
+        with self.transaction():
+            previous = self.goal_preparation(project, session, message, payload['goal_hash'])
+            if previous is not None: return previous
+            self.db.execute('INSERT INTO goal_preparations VALUES(?,?,?,?,?)',
+                (_key(message), *self._scope(project, session), payload['goal_hash'], _json(payload)))
+        return None
+
+    def goal_parent(self, project, run_id):
+        row = self.db.execute('SELECT payload FROM runs WHERE run_id=? AND project_key=? AND lifecycle=?',
+                              (run_id, _key(project), 'finalized')).fetchone()
+        if row is None: raise ValueError('goal_foreign_or_unfinished_parent')
+        saved = json.loads(row['payload'])
+        return self.read_run(project, saved['session_id'], run_id)
+
+    def goal_project_metadata(self, config, metadata):
+        """Project mappings остаются pinned; goal/occurrences принадлежат Run."""
+        row = self.db.execute('SELECT payload FROM snapshots WHERE project_key=? AND config_version=?',
+                              (_key(config.snapshot['project_id']), config.snapshot['version'])).fetchone()
+        if row is None: return metadata
+        saved = json.loads(row['payload'])
+        if saved['configuration'] != config.snapshot: raise ValueError('goal_project_config_changed')
+        for name in ('extraction', 'binding_rules', 'auth'):
+            if saved['metadata'].get(name) != metadata.get(name): raise ValueError('goal_project_mappings_changed')
+        # Старый снимок не переписывается. Текущие Run-specific descriptors
+        # доступны в его admission_manifest, а не под видом Project config.
+        return saved['metadata']
+
+    def save_goal_preparation(self, project, session, message, payload):
+        """Application checkpoint до LLM и после принятия; terminal immutable."""
+        with self.transaction():
+            old = self.goal_preparation(project, session, message, payload['goal_hash'])
+            if old and old['status'] in {'completed', 'blocked'} and _json(old) != _json(payload):
+                raise ValueError('goal_preparation_finalized')
+            self.db.execute('INSERT INTO goal_preparations VALUES(?,?,?,?,?) ON CONFLICT(message_key) DO UPDATE SET payload=excluded.payload',
+                (_key(message), *self._scope(project, session), payload['goal_hash'], _json(payload)))
 
     def lookup(self, project, session, message):
         row = self.db.execute("SELECT * FROM messages WHERE message_key=?", (_key(message),)).fetchone()
@@ -307,7 +362,7 @@ class SQLiteHistory:
         row = self.db.execute('SELECT lifecycle FROM runs WHERE run_id=?', (run_id,)).fetchone()
         if row['lifecycle'] != 'finalized':
             raise ValueError('fact_unfinished_run')
-        snapshot = self.snapshot(project, session, run_id)
+        snapshot = self._fact_snapshot(project, session, run_id, run)
         stamp = self.db.execute('SELECT * FROM fact_runs WHERE run_id=?', (run_id,)).fetchone()
         policy = self._fact_policy(project)
         fact = verify_fact(run, snapshot, descriptor, dict(stamp) if stamp else None, policy)
@@ -330,6 +385,17 @@ class SQLiteHistory:
                     'session_id': saved.get('session_id'), 'run_id': row['run_id']}):
             raise ValueError('fact_storage_binding_mismatch')
         return fact
+
+    def _fact_snapshot(self, project, session, run_id, run):
+        snapshot = self.snapshot(project, session, run_id)
+        manifest = run.get('admission_manifest') or {}
+        goal = manifest.get('goal_contract')
+        if goal:
+            from ..validation import fingerprint
+            if fingerprint(goal['manifest']) != goal['manifest_hash']: raise ValueError('goal_manifest_changed')
+            for name in ('extraction', 'binding_rules'):
+                snapshot['metadata'][name] = manifest[name]
+        return snapshot
 
     def propose_fact(self, project, session, run_id, descriptor):
         """Application API принимает только descriptor, никогда supplied evidence/verdict."""
@@ -360,7 +426,7 @@ class SQLiteHistory:
         run = self.read_run(project, session, run_id)
         if not run.get('contract'):
             return
-        snapshot = self.snapshot(project, session, run_id)
+        snapshot = self._fact_snapshot(project, session, run_id, run)
         for descriptor in automatic_proposals(run, snapshot):
             try:
                 self._propose_fact(project, session, run_id, descriptor)

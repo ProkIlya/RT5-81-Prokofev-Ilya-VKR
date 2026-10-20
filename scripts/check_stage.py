@@ -119,6 +119,9 @@ def post_stream(payload):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] in {'S09b', 'S09b1', 'S09b2', 'S09b3'} and sys.argv[2] in ('good', 'bad'):
+        from scripts.check_goals import main as goals_main
+        return goals_main(sys.argv[1], sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] == 'S09a' and sys.argv[2] in ('good', 'bad'):
         from scripts.check_project_facts import main as facts_main
         return facts_main(sys.argv[2])

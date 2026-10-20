@@ -195,12 +195,29 @@ class SQLiteHistory:
             if row is None:
                 raise ValueError("unknown_run")
             previous = json.loads(row["payload"])
-            for name in ("project_id", "session_id", "message_id", "target", "contract", "spec_hash", "goal", "goal_hash", "parent_run_id"):
+            for name in ("project_id", "session_id", "message_id", "target", "contract", "spec_hash", "goal", "goal_hash", "parent_run_id", "admission_manifest"):
                 if run.get(name) != previous.get(name):
                     raise ValueError("run_identity_changed")
             if row["lifecycle"] == "finalized" and _json(run) != row["payload"]:
                 raise ValueError("finalized_run_immutable")
             self.db.execute("UPDATE runs SET payload=? WHERE run_id=?", (_json(run), run["run_id"]))
+
+    def unresolved_mutations(self, project, *, exclude_run_id):
+        """Durable запрет Project не снимается новым Message/Session/parent.
+
+        История эффекта является authority приложения, а не памятью модели.
+        До отдельного проверенного resolution используется консервативный
+        запрет всех новых мутаций Project; чтения и другие Projects доступны.
+        """
+        unresolved = []
+        for row in self.db.execute('SELECT run_id,payload FROM runs WHERE project_key=? AND run_id<>?',
+                                   (_key(project), exclude_run_id)):
+            saved = json.loads(row['payload'])
+            if saved.get('run_id') != row['run_id']:
+                raise StorageError('run_snapshot_binding_mismatch')
+            if saved.get('uncertain_write') or saved.get('pending_mutation'):
+                unresolved.append(row['run_id'])
+        return unresolved
 
     def append_event(self, event):
         with self.transaction():
@@ -233,7 +250,7 @@ class SQLiteHistory:
             if row is None or (row["project_key"], row["session_key"]) != self._scope(project, session) or row["original_message_key"] != _key(message):
                 raise ValueError("finalization_scope_mismatch")
             previous = json.loads(row["payload"])
-            for name in ("project_id", "session_id", "message_id", "goal", "target", "spec_hash", "contract", "parent_run_id"):
+            for name in ("project_id", "session_id", "message_id", "goal", "target", "spec_hash", "contract", "parent_run_id", "admission_manifest"):
                 if previous.get(name) != run.get(name):
                     raise ValueError("run_identity_changed")
             self._finalize(row, run)
@@ -244,8 +261,15 @@ class SQLiteHistory:
             for row in self.db.execute("SELECT * FROM runs WHERE lifecycle='active'").fetchall():
                 run = json.loads(row["payload"])
                 run.update(status="partial", stop_reason="interrupted", stop_category="interrupted")
+                uncertain = run.get('uncertain_write') or run.get('pending_mutation') or any(e.get('effect_status') == 'uncertain'
+                    for e in run.get('exchanges', []))
+                if uncertain:
+                    run.update(uncertain_write=True, primary_safety_cause='uncertain_write',
+                               secondary_stop_reason='interrupted', stop_reason='uncertain_write',
+                               stop_category='needs_human')
                 run["report"] = report(run)
-                run["report"]["summary"] = "Запуск прерван; внешний результат может быть неизвестен. Автоматического повтора нет."
+                if not uncertain:
+                    run["report"]["summary"] = "Запуск прерван; внешний результат может быть неизвестен. Автоматического повтора нет."
                 run["response_message_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "answer:" + run["run_id"]))
                 self._finalize(row, run)
 

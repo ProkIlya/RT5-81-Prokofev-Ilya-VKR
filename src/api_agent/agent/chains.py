@@ -672,12 +672,13 @@ class ChainSession:
         finally:
             connection.close()
             exchange["wall_seconds"] = time.monotonic() - started
-            if op["method"] == "POST" and exchange["outcome"] not in {
+            if op["method"] not in {'GET', 'HEAD', 'OPTIONS'} and exchange["outcome"] not in {
                 "received",
                 "invalid_json",
                 "invalid_content_type",
             }:
                 self.uncertain = True
+                exchange['effect_status'] = 'uncertain'
             self.exchanges.append(exchange)
         self.state.protect(exchange)
         self._headers.clear()

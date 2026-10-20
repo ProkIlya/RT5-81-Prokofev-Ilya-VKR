@@ -24,6 +24,9 @@ def execution_schema(workflow, run):
                  and s['action']['arguments'].get('operation_id') in workflow.allowed]
     pending = [name for name in workflow.conditions if name not in checked]
     target = inspected[-1] if inspected and inspected[-1] not in checked else pending[0] if pending else None
+    slot = workflow.next_occurrence(run.get('exchanges', []))
+    if workflow.occurrences:
+        target = slot['operation_id'] if slot else None
     retry_unfiltered = next((s['action']['arguments']['operation_id'] for s in reversed(run.get('steps', []))
         if ((s.get('observation') or {}).get('data') or {}).get('verify_unfiltered')), None)
     if retry_unfiltered:
@@ -36,22 +39,26 @@ def execution_schema(workflow, run):
     if target is None:
         return None
 
-    def references(operation, path, secret):
-        return [v['ref'] for v in values if v['operation_id'] == operation and v['path'] == path and v['secret'] is secret]
+    def references(operation, path, secret, occurrence=None):
+        return [v['ref'] for v in values if v['operation_id'] == operation and v['path'] == path and v['secret'] is secret
+                and (occurrence is None or v.get('occurrence_id') == occurrence)
+                and (not secret or 'auth_state' not in run or
+                     (v.get('auth_epoch') == run['auth_state']['auth_epoch'] and
+                      v.get('principal') == run['auth_state']['principal']))]
 
     def ready(name, seen):
         if name in seen or name not in workflow.allowed:
             return None
         seen = seen | {name}
         op = workflow.catalog.operations[name]
-        if op['security'] and name not in workflow.anonymous_operations:
+        if workflow.request_mode(name, slot if name == target else None) == 'authenticated':
             auth = workflow.auth
             if not auth:
                 return None
             if not references(auth['login_operation'], auth['token_path'], True):
                 return ready(auth['login_operation'], seen)
         for rule in workflow.binding_rules.get(name, {}).values():
-            if not references(rule['source_operation'], rule['source_path'], False):
+            if not references(rule['source_operation'], rule['source_path'], False, rule.get('source_occurrence')):
                 return ready(rule['source_operation'], seen)
         return name
 
@@ -61,6 +68,9 @@ def execution_schema(workflow, run):
     op = workflow.catalog.operations[name]
     properties = {'operation_id': {'type':'string', 'enum':[name]}}
     required = ['operation_id']
+    if slot and name == slot['operation_id']:
+        properties['occurrence_id'] = {'type': 'string', 'enum': [slot['id']]}
+        required.append('occurrence_id')
     bindings = workflow.binding_rules.get(name, {})
     params = {p['name']:deepcopy(p['schema']) for p in op['parameters'] if p['name'] not in bindings and not (retry_unfiltered == name and p['in'] == 'query' and not p['required'])}
     if params:
@@ -68,14 +78,14 @@ def execution_schema(workflow, run):
         if properties['parameters']['required']:
             required.append('parameters')
     if bindings:
-        properties['bindings'] = {'type':'object','properties':{key:{'type':'string','enum':references(rule['source_operation'],rule['source_path'],False)} for key,rule in bindings.items()},'required':list(bindings),'additionalProperties':False}
+        properties['bindings'] = {'type':'object','properties':{key:{'type':'string','enum':references(rule['source_operation'],rule['source_path'],False,rule.get('source_occurrence'))} for key,rule in bindings.items()},'required':list(bindings),'additionalProperties':False}
         required.append('bindings')
     private_body = workflow.auth and name == workflow.auth['login_operation']
     if 'requestBody' in op and not private_body:
         properties['body'] = deepcopy(op['requestBody']['content']['application/json']['schema'])
         if op['requestBody'].get('required'):
             required.append('body')
-    if op['security'] and name not in workflow.anonymous_operations:
+    if workflow.request_mode(name, slot if name == target else None) == 'authenticated':
         properties['credential_ref'] = {'type':'string','enum':references(workflow.auth['login_operation'],workflow.auth['token_path'],True)}
         required.append('credential_ref')
     return {'type':'object','properties':properties,'required':required,'additionalProperties':False}

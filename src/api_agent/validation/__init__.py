@@ -568,6 +568,21 @@ def report(run):
     здесь отсутствуют. Свободная цель не объявляется полностью формализованной.
     """
     result = deepcopy(run.get("validation") or {})
+    # Один exchange оценивается один раз; read_response и копии DTO не
+    # увеличивают число нарушений. Поздний PASS не стирает прежний mismatch.
+    assessed = {}
+    for value in [*run.get('validations', []), *([run['validation']] if run.get('validation') else [])]:
+        assessed.setdefault(value['exchange_id'], value)
+    if assessed:
+        values = list(assessed.values())
+        verdicts = {v.get('contract_verdict') for v in values}
+        result['contract_verdict'] = ('mismatch' if 'mismatch' in verdicts else
+            'pass' if verdicts == {'pass'} else 'not_checked')
+        issues = [{**deepcopy(i), 'exchange_id': v['exchange_id'], 'operation_id': v['operation_id']}
+                  for v in values for i in v.get('issues', [])]
+        result.update(issues=issues[:128], issues_total=sum(v.get('issues_total', 0) for v in values),
+            confirmed_contract_violations=sum(v.get('confirmed_contract_violations', 0) for v in values))
+        result['issue_details_truncated'] = result['issues_total'] > len(result['issues'])
     intent_exchange = result.get('exchange_id')
     if run.get('chain_verdict') in {'pass','fail'} and any(
         c.get('selection_scope',{}).get('applicable') is False for c in result.get('checks',[])):
@@ -583,6 +598,11 @@ def report(run):
         # Успешный login не завершает ещё не выполненную бизнес-цепочку.
         result['intent_verdict'] = 'not_checked'
         result['task_postcondition'] = False
+    from .selection_scope import applicable
+    failed = next((v for v in assessed.values() if v.get('intent_verdict') == 'fail' and applicable(v)), None)
+    if failed is not None:
+        result.update(intent_verdict='fail', task_postcondition=True, checks=deepcopy(failed['checks']))
+        intent_exchange = failed['exchange_id']
     labels = {
         "pass": "соответствует",
         "fail": "не соответствует",
@@ -660,6 +680,21 @@ def report(run):
             summary = "Нужно уточнить цель: выбранный профиль поддерживает только свою короткую цепочку. Запрос не отправлен."
     elif reason == "invalid_expectation":
         summary = "Условие не поддерживается или не имеет проверенного основания. Уточните его до запроса; HTTP не отправлен."
+    restrictions = {
+        'policy_denied': 'Действие запрещено текущей политикой доступа',
+        'approval_required': 'Для действия требуется подтверждение владельца',
+        'approval_rejected': 'Действие отменено: владелец отклонил подтверждение',
+        'precondition_not_verified': 'Условие зависимого действия ложно или не подтверждено',
+        'target_not_applicable': 'Выбранная сущность не соответствует принятой цели',
+        'request_limit': 'Исчерпан бюджет HTTP-запросов',
+    }
+    if reason in restrictions:
+        mode = (run.get('policy_config') or {}).get('mode')
+        summary = restrictions[reason] + (f' (режим {mode})' if mode else '') + '. Цель не подтверждена; повтор запрещён без новой проверки.'
+    if run.get('primary_safety_cause') == 'uncertain_write' or run.get('uncertain_write'):
+        summary = 'Результат изменяющего запроса неизвестен. Автоматический повтор запрещён; ранее полученные свидетельства сохранены.'
+    if run.get('blocking_uncertain_runs'):
+        summary = 'Результат предыдущего изменяющего запроса Project неизвестен. Новая мутация запрещена до проверенного разрешения неопределённости; новое сообщение не снимает запрет.'
     diagnostic = (
         None
         if run["status"] == "completed"
@@ -692,6 +727,9 @@ def report(run):
         "goal_hash": run.get("goal_hash"),
         "execution_status": run["status"],
         "stop_reason": run["stop_reason"],
+        **({'primary_safety_cause': run['primary_safety_cause']} if run.get('primary_safety_cause') else {}),
+        **({'blocking_uncertain_runs': deepcopy(run['blocking_uncertain_runs'])} if run.get('blocking_uncertain_runs') else {}),
+        **({'secondary_stop_reason': run['secondary_stop_reason']} if run.get('secondary_stop_reason') else {}),
         "contract_verdict": result.get("contract_verdict", "not_checked"),
         "intent_verdict": result.get("intent_verdict", "not_checked"),
         **(

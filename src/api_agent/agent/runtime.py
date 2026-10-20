@@ -184,6 +184,9 @@ class StartAgentRun:
         self.target, _ = loopback_origin(target)
         self.catalog = catalog
         self.workflow = workflow
+        # Private credentials остаются в памяти приложения; сравнение не
+        # публикует ни значения, ни перебираемый hash низкоэнтропийного пароля.
+        self._accepted_auth = deepcopy(getattr(workflow, 'auth', None))
         self.initial_operation = workflow.create if workflow else "getPet"
         if workflow is not None:
             workflow.validate_catalog(catalog)
@@ -231,7 +234,7 @@ class StartAgentRun:
         self._runs = {}
         self._lock = threading.Lock()
 
-    def safe(self, value):
+    def safe(self, value, *, _public_metadata=False):
         """Маскировать доверенно настроенные secrets до любого наблюдаемого выхода.
 
         Это конечная классификация приложения, не обещание распознать неизвестный
@@ -257,8 +260,25 @@ class StartAgentRun:
         # Сначала пути по исходным именам ключей: статический secret может
         # совпасть с именем token и переименовать его до структурной редакции.
         # Строковое маскирование после этого уже не может открыть ветвь.
-        result = self._active_state.redact(value) if self._active_state else value
+        result = (
+            (self._active_state.redact_public_metadata(value) if _public_metadata
+             else self._active_state.redact(value))
+            if self._active_state else value
+        )
         return redact(result)
+
+    def _safe_run(self, run):
+        """Явная граница Run DTO: только contract является публичным metadata.
+
+        Не ищем имя contract рекурсивно: ответ API не может объявить себя
+        доверенным снимком. Маскирование literal не отключается; изменение
+        основания по-прежнему отклоняет immutable guard хранилища.
+        """
+        metadata = {'contract', 'admission_manifest', 'policy_config', 'run_catalog'}
+        public = self.safe({k: v for k, v in run.items() if k not in metadata})
+        for key in metadata & run.keys():
+            public[key] = self.safe(run[key], _public_metadata=True)
+        return public
 
     def _tool_content(self, result):
         """Сначала маскировать DTO, затем применить формат профиля workflow."""
@@ -355,6 +375,8 @@ class StartAgentRun:
                 "parallel_tool_calls": False,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
+            if self.workflow and hasattr(self.workflow, 'runtime_manifest'):
+                run['admission_manifest'] = self.workflow.runtime_manifest()
             # Снимок и hashes должны описывать одно доступное основание. Маска
             # literal enum, имени поля или pointer меняет контракт, поэтому
             # redaction не может служить его каноническим преобразованием.
@@ -373,6 +395,7 @@ class StartAgentRun:
                         else "/responses/201"
                     ),
                 },
+                **({'admission_manifest': run['admission_manifest']} if 'admission_manifest' in run else {}),
             }
             if self.safe(identity) != identity:
                 # Нельзя сохранять секретное ограничение или объявлять маску
@@ -385,12 +408,16 @@ class StartAgentRun:
                     status="blocked",
                     stop_reason="contract_redaction_conflict",
                 )
+            if run['stop_reason'] is None and getattr(self.workflow, 'feasibility_stop', None):
+                run.update(status='blocked', stop_reason=self.workflow.feasibility_stop)
+            if run['stop_reason'] is None and len(getattr(self.workflow, 'occurrences', [])) > self.limits.max_requests:
+                run.update(status='blocked', stop_reason='request_limit')
             # Регистрация раньше запуска исключает повтор HTTP после ошибки trace.
             # Исходные trusted IDs — приватная authority, только в памяти под
             # lock. Маскированный DTO не определяет принадлежность команды:
             # разные исходные ID могут иметь одинаковое отображение. Scope
             # никогда не передаётся в sink, prompt, исключения или public return.
-            entry = {"scope": (project_id, session_id), "run": self.safe(run)}
+            entry = {"scope": (project_id, session_id), "run": self._safe_run(run)}
             # Узкий S05 распознаёт только известную цель проверки getPet.
             # Явные нормализованные conditions или checks_only — доверенная
             # команда UI/application, не полномочие модели переименовать цель.
@@ -450,13 +477,17 @@ class StartAgentRun:
                     "extraction": getattr(self.workflow, "extraction", {}),
                     "binding_rules": getattr(self.workflow, "binding_rules", {}),
                     "selection_scopes": getattr(self.workflow, "selection_scopes", {}),
+                    "request_auth": getattr(self.workflow, "request_auth", {}),
+                    "occurrences": getattr(self.workflow, "occurrences", []),
+                    "admission_rules": getattr(self.workflow, "admission_rules", {}),
+                    **({'admission_manifest': run['admission_manifest']} if 'admission_manifest' in run else {}),
                 }
                 auth = getattr(self.workflow, "auth", None)
                 if auth:
                     metadata["auth"] = {k: auth[k] for k in ("login_operation", "token_path")}
                     metadata["auth"]["public_body_fields"] = list(auth.get("public_body_fields", []))
                 previous = self.history_store.begin_run(
-                    project_id, session_id, message_id, self.safe(run),
+                    project_id, session_id, message_id, self._safe_run(run),
                     environment=self.environment,
                     configuration=self.safe(configuration), metadata=self.safe(metadata),
                 )
@@ -469,15 +500,18 @@ class StartAgentRun:
             if self.history_store:
                 result["response_message_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "answer:" + result["run_id"]))
                 try:
-                    self.history_store.finalize(project_id, session_id, message_id, self.safe(result))
+                    self.history_store.finalize(project_id, session_id, message_id, self._safe_run(result))
                 except Exception:
-                    result.update(status="failed", stop_reason="storage_error")
+                    if result.get('primary_safety_cause'):
+                        result.update(status='failed', secondary_stop_reason='storage_error')
+                    else:
+                        result.update(status="failed", stop_reason="storage_error")
                     result["report"] = self.safe(report(result))
                 else:
                     # Durable ответ уже создан: экспорт показывает ту же связь,
                     # не переписывая immutable finalized snapshot в SQLite.
-                    self.trace_sink(self.safe(result))
-            entry["run"] = self.safe(result)
+                    self.trace_sink(self._safe_run(result))
+            entry["run"] = self._safe_run(result)
             return deepcopy(entry["run"])
 
     def _loop(self, run, model, cancel, prepared):
@@ -519,6 +553,11 @@ class StartAgentRun:
             run["status"] = "failed"
         finally:
             run["requests"] = session.requests
+            # Если процесс дошёл до finally и транспорт не оставил uncertain,
+            # известный ответ либо отмена до отправки закрывают prepared marker.
+            # При crash этот finally не выполняется: marker остаётся durable.
+            if not getattr(session, 'uncertain', False):
+                run.pop('pending_mutation', None)
             if len(run["exchanges"]) != len(session.exchanges):
                 run["exchanges"] = []
                 for exchange in session.exchanges:
@@ -535,6 +574,7 @@ class StartAgentRun:
                             }
                         )
             run["wall_seconds"] = self.clock() - started
+            self._preserve_safety(run, session)
             if not run["stop_reason"]:
                 run["stop_reason"] = "runtime_error"
                 run["status"] = "failed"
@@ -546,10 +586,14 @@ class StartAgentRun:
             if self.summary_reviewer is not None:
                 # Новый контекст без API tools; тот же deadline и total budget.
                 # Диагноз LLM не получает права переписать validation/вердикт.
-                reviewed = self.summary_reviewer.review(
-                    self.safe(run), self.limits, self.token_counter or getattr(model, 'count_tokens', None),
-                    started + self.limits.max_seconds,
-                )
+                try:
+                    reviewed = self.summary_reviewer.review(
+                        self._safe_run(run), self.limits, self.token_counter or getattr(model, 'count_tokens', None),
+                        started + self.limits.max_seconds,
+                    )
+                except Exception:
+                    reviewed = {'assessment': {'status': 'unavailable', 'verification': 'advisory',
+                        'error_code': 'review_failed'}, 'calls': 0}
                 run['summary_review'] = self.safe(reviewed)
                 run['agent_model_calls'] = run['model_calls']
                 run['review_model_calls'] = reviewed['calls']
@@ -560,6 +604,7 @@ class StartAgentRun:
                 run['resources']['wall_seconds'] = run['wall_seconds']
                 run['report'] = self.safe(report(run))
                 self._emit(run, 'summary_review', {'status':reviewed['assessment']['status'],'calls':reviewed['calls']})
+            self._preserve_safety(run, session)
             try:
                 self._persist_snapshot(run)
             except Exception:
@@ -571,6 +616,7 @@ class StartAgentRun:
                 {"status": run["status"], "stop_category": run["stop_category"]},
             )
             run["stop_category"] = stop_category(run)
+            self._preserve_safety(run, session)
             run["report"] = self.safe(report(run))
             try:
                 self._persist_snapshot(run)
@@ -579,9 +625,11 @@ class StartAgentRun:
                 # Последний отказ sink также виден в доступном JSONL. Повтор
                 # HTTP/LLM или бесконечные попытки записи не выполняются.
                 self._emit(run, "snapshot_error", {"error_code": "invariant_violated"})
+            self._preserve_safety(run, session)
             run["stop_category"] = stop_category(run)
             run["report"] = self.safe(report(run))
         if self.workflow:
+            run = self._safe_run(run)
             session.exchanges[:] = self.safe(session.exchanges)
             session._headers.clear()
             session.actions.clear()
@@ -591,9 +639,29 @@ class StartAgentRun:
             self._active_state = None
         return run
 
+    def _preserve_safety(self, run, session):
+        """Внешний outcome первичен; вторичная ошибка не разрешает replay."""
+        if not getattr(session, 'uncertain', False):
+            return
+        run['uncertain_write'] = True
+        run['primary_safety_cause'] = 'uncertain_write'
+        if run.get('stop_reason') not in (None, 'uncertain_write'):
+            run['secondary_stop_reason'] = run['stop_reason']
+        run['stop_reason'] = 'uncertain_write'
+        if run['status'] == 'completed':
+            run['status'] = 'partial'
+
+    def _unresolved_mutations(self, run):
+        """Проверять Project authority перед каждым изменяющим HTTP."""
+        if self.history_store:
+            return self.history_store.unresolved_mutations(run['project_id'], exclude_run_id=run['run_id'])
+        return [entry['run']['run_id'] for entry in self._runs.values()
+                if entry['scope'][0] == run['project_id'] and entry['run']['run_id'] != run['run_id']
+                and (entry['run'].get('uncertain_write') or entry['run'].get('pending_mutation'))]
+
     def _persist_snapshot(self, run):
         """Отказ любой durable записи останавливает следующий внешний эффект."""
-        snapshot = deepcopy(self.safe(run))
+        snapshot = deepcopy(self._safe_run(run))
         if self.history_store:
             self.history_store.save_snapshot(snapshot)
         self.trace_sink(snapshot)
@@ -690,6 +758,7 @@ class StartAgentRun:
         run["resources"] = budget.snapshot()
         seen, repeats = set(), {}
         expectations_hash = fingerprint(run["expectations"])
+        manifest_hash = fingerprint(run.get('admission_manifest'))
         validation_stamp = exchange_stamp = chain_validation_stamp = None
         # Это исходное основание, не отпечаток маскированного DTO. Секретное
         # ожидаемое значение проверяется до redaction и не заменяется маской.
@@ -839,10 +908,18 @@ class StartAgentRun:
             if self.clock() >= deadline:
                 stop("time_limit")
                 return False
+            if getattr(self.workflow, 'auth', None) != self._accepted_auth:
+                stop('expectation_changed', 'failed')
+                return False
             if run["goal_hash"] != fingerprint(
                 self.safe(run["goal"])
             ) or expectations_hash != fingerprint(run["expectations"]):
                 stop("expectation_changed", "failed")
+                return False
+            if self.workflow and hasattr(self.workflow, 'runtime_manifest') and (
+                fingerprint(run.get('admission_manifest')) != manifest_hash or
+                fingerprint(self.workflow.runtime_manifest()) != manifest_hash):
+                stop('expectation_changed', 'failed')
                 return False
             return True
 
@@ -896,7 +973,10 @@ class StartAgentRun:
                 **run["model"]["request_options"],
                 **run["model"]["sampling"],
             }
-            if self.workflow and hasattr(self.workflow, "phase_registry"):
+            if self.workflow and hasattr(self.workflow, 'phase_decision'):
+                phase = self.workflow.phase_decision(run, payload['tools'])
+                payload['tools'], payload['tool_choice'] = phase.tools, phase.tool_choice
+            elif self.workflow and hasattr(self.workflow, "phase_registry"):
                 payload["tools"] = self.workflow.phase_registry(run, payload["tools"])
             # UUID нельзя надёжно переписывать малой моделью как свободный
             # текст. Native grammar предлагает только уже наблюдённые ID;
@@ -1118,12 +1198,12 @@ class StartAgentRun:
                                 else {}
                             ),
                         )
-                    if self._active_state and "catalog_operation" in observation:
+                    if self._active_state:
                         # Schema пришла от workflow.inspect, а не из HTTP/model.
                         # Регистрация exact DTO не доверяет одноимённым data keys.
-                        self._active_state.trust_public_catalog(
-                            observation["catalog_operation"]
-                        )
+                        for key in ('catalog_operation', 'operation'):
+                            if key in observation:
+                                self._active_state.trust_public_catalog(observation[key])
                     result = tool_result(
                         observation,
                         provenance={
@@ -1134,11 +1214,24 @@ class StartAgentRun:
                         },
                     )
                 else:
+                    mutation = self.catalog.operations[args['operation_id']]['method'] not in {'GET', 'HEAD', 'OPTIONS'}
+                    if mutation:
+                        unresolved = self._unresolved_mutations(run)
+                        if unresolved:
+                            run.update(blocking_uncertain_runs=unresolved, primary_safety_cause='uncertain_write')
+                            stop('unresolved_uncertain_write')
+                            emit('http_blocked', {'reason': 'unresolved_uncertain_write', 'blocking_run_ids': unresolved})
+                            break
                     if self.workflow:
                         session.admit(args)
                     if run["requests"] >= self.limits.max_requests:
                         stop("request_limit")
                         break
+                    if mutation:
+                        # Фиксируется ДО HTTP. Новый Message не является
+                        # разрешением повторить эффект, потерянный при crash.
+                        run['pending_mutation'] = {'operation_id': args['operation_id'],
+                            'request_index': session.requests + 1}
                     if (
                         not persist()
                         or not emit(
@@ -1150,7 +1243,8 @@ class StartAgentRun:
                     run["requests"] += 1
                     executing = True
                     if self.workflow:
-                        prepared = prepared_map[args["operation_id"]]
+                        key = self.workflow.prepared_key(args) if hasattr(self.workflow, 'prepared_key') else args['operation_id']
+                        prepared = prepared_map[key]
                         trusted_validation_basis.update(
                             operation_id=args["operation_id"],
                             operation_hash=self.catalog.operation_hashes[
@@ -1169,6 +1263,8 @@ class StartAgentRun:
                             for e in prepared
                         ]
                     exchange = session.execute(args)
+                    if mutation and not getattr(session, 'uncertain', False):
+                        run.pop('pending_mutation', None)
                     validation = validate_exchange(self.catalog, exchange, prepared)
                     if not isinstance(validation, dict):
                         raise RuntimeError("validator_missing")
@@ -1340,6 +1436,9 @@ class StartAgentRun:
                     }
                 )
             if not persist():
+                break
+            if getattr(session, 'uncertain', False):
+                stop('uncertain_write')
                 break
 
     def _decision(self, response):

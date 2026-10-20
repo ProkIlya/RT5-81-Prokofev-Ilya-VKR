@@ -31,6 +31,12 @@ class SecretBoundaryTests(unittest.TestCase):
             "operation_id": "loginUser",
             **auth_contract().operations["loginUser"],
         }
+        # Одинаковая форма сама по себе не даёт metadata authority.
+        untrusted = state.redact({'operation': operation})
+        self.assertEqual(untrusted['operation']['responses']['200']['content']['application/json']['schema']['properties']['token'], '[REDACTED]')
+        # Как в runtime inspect: приложение явно регистрирует exact DTO,
+        # полученный от pinned каталога, до публикации schema.
+        state.trust_public_catalog(operation)
         public = state.redact({"operation": operation})
         schema = public["operation"]["responses"]["200"]["content"]["application/json"][
             "schema"

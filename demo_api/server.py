@@ -52,6 +52,13 @@ class DemoServer:
                     pass
 
             def do_POST(self):
+                if self.path == '/users/logout':
+                    matched = self.headers.get('Authorization') == 'Bearer ' + owner.auth_token
+                    owner.journal.append({'method': 'POST', 'path': self.path, 'auth_matched': matched})
+                    if matched:
+                        owner.auth_token = secrets.token_urlsafe(32)
+                    self.send_json(200 if matched else 401, {'logged_out': matched})
+                    return
                 if self.path == "/users/login":
                     try:
                         length = int(self.headers.get("Content-Length", "0"))

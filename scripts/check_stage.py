@@ -119,6 +119,9 @@ def post_stream(payload):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] in ('S08R', 'S08Ra', 'S08Rb', 'S08Rc', 'S08Rd', 'S08Re') and sys.argv[2] in ('good', 'bad'):
+        from scripts.check_integration_repair import main as repair_main
+        return repair_main(sys.argv[1], sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] in ("S08", "S08a", "S08b") and sys.argv[2] in ("good", "bad"):
         from scripts.check_history import main as history_main
         mode = sys.argv[2]

@@ -235,6 +235,12 @@ def stop_category(run):
         "invalid_expectation": "needs_human",
         "clarification_required": "needs_human",
         "contract_redaction_conflict": "needs_human",
+        'uncertain_write': 'needs_human',
+        'unresolved_uncertain_write': 'needs_human',
+        'target_not_applicable': 'needs_human',
+        'precondition_not_verified': 'needs_human',
+        'unsupported_goal_capability': 'needs_human',
+        'stale_auth_epoch': 'needs_human',
     }.get(reason, "fatal")
 
 

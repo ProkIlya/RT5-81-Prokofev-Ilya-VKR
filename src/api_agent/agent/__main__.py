@@ -10,6 +10,7 @@ import sys
 import uuid
 import signal
 import threading
+from dataclasses import replace
 
 from . import StartAgentRun
 from .model import LocalModel
@@ -31,6 +32,10 @@ def main(argv=None, *, model=None, token_counter=None):
     parser.add_argument("--llm-target", default="http://127.0.0.1:18081")
     parser.add_argument("--model-name", default="MiniCPM5-2B-Q4_K_M")
     parser.add_argument('--review-summary',action='store_true',help='One isolated advisory consistency check after the agent finishes; no additional API actions')
+    parser.add_argument('--max-requests',type=int,help='HTTP budget per Run (catalog/chains default: 10, including login)')
+    parser.add_argument('--max-steps',type=int,help='Maximum primary model steps (catalog/chains default: 24)')
+    parser.add_argument('--max-seconds',type=float,help='Overall Run deadline in seconds')
+    parser.add_argument('--max-tokens-total',type=int,help='Cumulative token budget, including the optional reviewer')
     parser.add_argument("--evidence-dir", default="evidence/agent")
     parser.add_argument("--history-db", help="SQLite history; default: evidence-dir/history.sqlite3")
     parser.add_argument("--project-id")
@@ -192,11 +197,19 @@ def main(argv=None, *, model=None, token_counter=None):
                 )
         from ..storage import SQLiteHistory
         from .summary_review import FinalSummaryReviewer
+        from .chains import ChainLimits
+        from .runtime import Limits
+        defaults=(workflow.default_limits() if workflow and hasattr(workflow,'default_limits')
+                  else ChainLimits() if workflow else Limits())
+        # Только команда приложения задаёт budgets; tools не могут их расширять.
+        limits=replace(defaults,**{name:getattr(args,name) for name in
+            ('max_requests','max_steps','max_seconds','max_tokens_total') if getattr(args,name) is not None})
         history = SQLiteHistory(args.history_db or directory / "history.sqlite3")
         app = StartAgentRun(
             args.target,
             catalog,
             workflow=workflow,
+            limits=limits,
             trace_sink=sink,
             token_counter=token_counter,
             event_sink=JsonlJournal(directory),

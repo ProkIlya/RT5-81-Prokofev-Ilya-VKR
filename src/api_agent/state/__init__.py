@@ -23,6 +23,20 @@ class RunState:
         self._records = {}
         self._secrets = set()
         self._public_catalog_hashes = set()
+        self.auth_epoch = 0
+        self.principal = None
+        self.auth_revocations = 0
+
+    def begin_auth(self, principal):
+        """Приложение открывает новую эпоху; старые refs остаются историей."""
+        self.auth_epoch += 1
+        self.principal = principal
+
+    def invalidate_auth(self):
+        """Отзыв не удаляет evidence и никогда не оживляет старый credential."""
+        self.auth_epoch += 1
+        self.auth_revocations += 1
+        self.principal = None
 
     def remember(self, exchange, path):
         """Извлечь только заранее разрешённый путь из ответа собственного Run."""
@@ -57,6 +71,9 @@ class RunState:
             "type": rule["type"],
             "secret": bool(rule.get("secret")),
             "value": deepcopy(value),
+            **({'occurrence_id': exchange['occurrence_id']} if 'occurrence_id' in exchange else {}),
+            **({'auth_epoch': self.auth_epoch, 'principal': self.principal}
+               if rule.get('secret') else {}),
         }
         return self._public_record(self._records[ref])
 
@@ -126,6 +143,14 @@ class RunState:
                 value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
+
+    def redact_public_metadata(self, value):
+        """Доверенные metadata не являются response body; literals всё ещё скрыты.
+
+        Вызывается приложением только для закреплённого ContractSnapshot.
+        Имена полей HTTP и похожие на каталог оболочки такого допуска не дают.
+        """
+        return self.redact(value, _catalog=True)
 
     def redact(self, value, *, _catalog=False):
         """Скрыть секретный путь целиком, не полагаясь на допустимый тип token.
@@ -198,12 +223,7 @@ class RunState:
             redacted = {
                 self.redact(k): self.redact(
                     v,
-                    _catalog=_catalog
-                    or (
-                        k == "operation"
-                        and isinstance(v, dict)
-                        and {"operation_id", "method", "path", "responses"} <= set(v)
-                    ),
+                    _catalog=_catalog,
                 )
                 for k, v in value.items()
             }

@@ -225,6 +225,8 @@ class PolicySession(ChainSession):
             ).hexdigest(),
         }
         preview = {"method": op["method"], "path": path}
+        if hasattr(self, '_request_principal'):
+            proposal['request_principal'] = deepcopy(self._request_principal)
         if body is not None:
             private_body = (
                 getattr(self.workflow, "auth", None) is not None
@@ -264,6 +266,10 @@ class PolicySession(ChainSession):
                 if fingerprint(now) != fingerprint(current):
                     raise PolicyStop("stale_approval")
             self._approved.add(proof)
+        principal = getattr(self, '_request_principal', None)
+        if principal is not None and (principal['auth_epoch'] != self.state.auth_epoch or
+            (principal['mode'] == 'authenticated' and principal['actor'] != self.state.principal)):
+            raise PolicyStop('stale_auth_epoch')
         if getattr(self, "cancel", None) is not None and self.cancel.is_set():
             raise PolicyStop("cancelled")
         return result
@@ -284,8 +290,8 @@ class PolicySession(ChainSession):
                 exchange["effect_status"] = (
                     "uncertain" if uncertain else "response_received"
                 )
-                self.uncertain = uncertain
-                self.run["uncertain_write"] = uncertain
+                self.uncertain = self.uncertain or uncertain
+                self.run["uncertain_write"] = self.uncertain
             return exchange
         finally:
             self._approved.clear()

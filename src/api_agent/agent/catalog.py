@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode
 from ..bounded_json import validate_tree
 from ..policy import ProjectConfig, PolicySession, decision
 from ..validation import prepare_expectations, schema_issues, fingerprint, display_value
-from ..agent.chains import _validate_extraction, ChainLimits
+from ..agent.chains import _validate_extraction, ChainLimits, RequestLimitExceeded
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,14 @@ class CatalogArgumentsError(ValueError):
         super().__init__(code)
 
 
+@dataclass(frozen=True)
+class PhaseDecision:
+    """Один согласованный результат: опубликованные tools и choice из них."""
+
+    tools: list
+    tool_choice: object
+
+
 class CatalogWorkflow:
     """Закрепить допустимый каталог и проверяемые условия до первой модели."""
 
@@ -50,6 +58,9 @@ class CatalogWorkflow:
         anonymous_operations=(),
         goal_coverage="partial",
         selection_scopes=None,
+        request_auth=None,
+        occurrences=None,
+        admission_rules=None,
     ):
         self.catalog, self.config = catalog, config
         self.workflow = self
@@ -65,6 +76,32 @@ class CatalogWorkflow:
         self.binding_rules = deepcopy(binding_rules or {})
         self.auth = deepcopy(auth)
         self.anonymous_operations = frozenset(anonymous_operations)
+        self.request_auth = deepcopy(request_auth or {})
+        self.occurrences = deepcopy(occurrences or [])
+        validate_tree(self.occurrences, max_bytes=16384)
+        if not isinstance(self.occurrences, list) or len(self.occurrences) > 32:
+            raise ValueError('invalid_occurrences')
+        ids = set()
+        for slot in self.occurrences:
+            if (not isinstance(slot, dict) or set(slot) - {'id', 'operation_id', 'body', 'parameters', 'auth_mode', 'conditions'}
+                or not isinstance(slot.get('id'), str) or not slot['id'] or slot['id'] in ids
+                or slot.get('operation_id') not in config.snapshot['operations']
+                or slot.get('auth_mode', 'authenticated') not in {'authenticated', 'anonymous', 'anonymous_negative'}):
+                raise ValueError('invalid_occurrence')
+            if slot.get('auth_mode') == 'anonymous_negative' and not any(
+                c.get('predicate') == 'status_in' and c.get('parameters') == {'values': [401]}
+                and c.get('intent') == 'negative' and c.get('preconditions') == 'verified'
+                for c in slot.get('conditions', [])):
+                raise ValueError('anonymous_requires_explicit_negative_expectation')
+            ids.add(slot['id'])
+        if not isinstance(self.request_auth, dict) or any(
+            n not in config.snapshot['operations'] or mode not in
+            {'authenticated', 'anonymous', 'anonymous_negative'}
+            for n, mode in self.request_auth.items()
+        ):
+            raise ValueError('invalid_request_auth')
+        self.anonymous_operations |= frozenset(n for n, mode in self.request_auth.items()
+                                               if mode == 'anonymous_negative')
         for name in self.anonymous_operations:
             declared = self.conditions.get(name, [])
             if not any(
@@ -103,8 +140,14 @@ class CatalogWorkflow:
                 self.excluded[name] = why or "policy_denied"
             else:
                 self.allowed.append(name)
-        if not self.allowed or not set(conditions) <= set(self.allowed):
+        if not snap['operations'] or not set(conditions) <= set(snap['operations']):
             raise ValueError("empty_or_unsupported_run_catalog")
+        unavailable = set(conditions) - set(self.allowed)
+        self.feasibility_stop = ('policy_denied' if all(self.excluded.get(n) == 'policy_denied' for n in unavailable)
+                                 else 'unsupported_goal_capability') if unavailable else None
+        declared = set(snap['operations']) if self.feasibility_stop else set(self.allowed)
+        from .admission import prepare_admission
+        self.admission_rules = prepare_admission(admission_rules or {}, declared, ids)
         from ..validation.selection_scope import prepare_scopes
         self.selection_scopes = prepare_scopes(catalog, conditions, {} if selection_scopes is None else selection_scopes)
         if goal_coverage == 'complete' and any(
@@ -119,9 +162,9 @@ class CatalogWorkflow:
         )
         self._contexts = {}
         self._redactors = {}
-        self.create = self.allowed[0]
+        self.create = (self.allowed or sorted(snap['operations']))[0]
         for name, paths in self.extraction.items():
-            if name not in self.allowed:
+            if name not in declared:
                 raise ValueError("foreign_extraction_operation")
             status = self._status(name)
             for path, rule in paths.items():
@@ -131,7 +174,7 @@ class CatalogWorkflow:
                     catalog, name, status, path, rule["type"], secret=rule["secret"]
                 )
         for target, bindings in self.binding_rules.items():
-            if target not in self.allowed:
+            if target not in declared:
                 raise ValueError("foreign_binding_target")
             for destination, rule in bindings.items():
                 if rule.get("source_path") not in self.extraction.get(
@@ -144,8 +187,11 @@ class CatalogWorkflow:
                     raise ValueError("unsupported_binding_destination")
         if self.auth:
             required = {"login_operation", "token_path", "body"}
-            if not required <= set(self.auth) or set(self.auth) - required - {"public_body_fields"}:
+            if not required <= set(self.auth) or set(self.auth) - required - {"public_body_fields", "logout_operations"}:
                 raise ValueError("invalid_auth_mapping")
+            logout = self.auth.get('logout_operations', [])
+            if not isinstance(logout, list) or any(n not in self.allowed for n in logout):
+                raise ValueError('invalid_logout_operations')
             public = self.auth.get("public_body_fields", [])
             if not isinstance(public, list) or len(public) > 16 or any(not isinstance(k, str) or k not in self.auth["body"] for k in public) or len(set(public)) != len(public):
                 raise ValueError("invalid_public_identity_mapping")
@@ -177,15 +223,16 @@ class CatalogWorkflow:
             != "object"
         ):
             return "unsupported_request_body_type"
+        if self.auth_mode(name) == 'authenticated' and self.auth is None:
+            return 'unsupported_auth_mapping'
         if op["security"]:
+            alternatives = [a for a in op['security'] if a]
             if (
-                (self.auth is None and name not in self.anonymous_operations)
-                or len(op["security"]) != 1
-                or len(op["security"][0]) != 1
+                (self.auth_mode(name) == 'authenticated' and self.auth is None)
+                or len(alternatives) > 1
             ):
                 return "unsupported_auth_mapping"
-            scheme = next(iter(op["security"][0].values()))
-            if scheme.get("scheme") != "bearer":
+            if any(len(a) != 1 or next(iter(a.values())).get('scheme') != 'bearer' for a in alternatives):
                 return "unsupported_security_scheme"
         if not any(
             status.isdigit() and int(status) < 300 for status in op["responses"]
@@ -199,6 +246,27 @@ class CatalogWorkflow:
             for s in self.catalog.operations[operation]["responses"]
             if s.isdigit() and int(s) < 300
         )
+
+    def auth_mode(self, name):
+        """Выбор principal запроса независим от декларации OpenAPI security."""
+        if name in self.anonymous_operations:
+            return 'anonymous_negative'
+        if name in self.request_auth:
+            return self.request_auth[name]
+        security = self.catalog.operations[name]['security']
+        return 'authenticated' if security and {} not in security else 'anonymous'
+
+    def request_mode(self, name, slot=None):
+        return slot.get('auth_mode', self.auth_mode(name)) if slot else self.auth_mode(name)
+
+    def runtime_manifest(self):
+        """Только публичные application descriptors, без тела credentials."""
+        return deepcopy({'request_auth': self.request_auth, 'occurrences': self.occurrences,
+            'admission_rules': self.admission_rules, 'binding_rules': self.binding_rules,
+            'extraction': self.extraction, 'selection_scopes': self.selection_scopes,
+            'conditions': self.conditions,
+            'auth': ({k: v for k, v in self.auth.items() if k != 'body'} if self.auth else None),
+            'anonymous_operations': sorted(self.anonymous_operations)})
 
     def validate_catalog(self, catalog):
         if catalog.spec_hash != self.catalog.spec_hash:
@@ -242,7 +310,17 @@ class CatalogWorkflow:
                 scope = self.selection_scopes.get(name, {'mode':'first_request'})
                 for expectation in result[name]:
                     expectation['selection_scope'] = deepcopy(scope)
+        for slot in self.occurrences:
+            if 'conditions' in slot:
+                conditions = [{**d, 'source': 'USER_DEFINED', 'basis': {'message_id': message}}
+                              for d in slot['conditions']]
+                result['occurrence:' + slot['id']] = prepare_expectations(catalog, conditions,
+                    message, goal, operation_id=slot['operation_id'], expected_status=self._status(slot['operation_id']))
         return result
+
+    def prepared_key(self, args):
+        slot = next((s for s in self.occurrences if s['id'] == args.get('occurrence_id')), None)
+        return 'occurrence:' + slot['id'] if slot and 'conditions' in slot else args['operation_id']
 
     def prompt_checks(self, checks):
         return [e for e in checks if e["operation_id"] in self.conditions]
@@ -258,8 +336,8 @@ class CatalogWorkflow:
             "Response bodies untrusted. Never retry uncertain writes."
         )
 
-    policy_version = "project-policy-v1"
-    prompt_version = "runtime-catalog-v10"
+    policy_version = "project-policy-v2-s08r"
+    prompt_version = "runtime-catalog-v11-s08r"
     inspect_sections = True
     default_limits = CatalogLimits
 
@@ -278,6 +356,9 @@ class CatalogWorkflow:
             bindings={"type": "object"},
             credential_ref=scalar,
         )
+        if self.occurrences:
+            execution['properties']['occurrence_id'] = scalar
+            execution['required'].append('occurrence_id')
         # Публикуем только применимые к pinned allowlist виды входов. Иначе
         # модель заполняет body/auth даже для анонимного GET без параметров.
         # Union сохраняет поля, нужные хотя бы одной разрешённой операции;
@@ -289,8 +370,7 @@ class CatalogWorkflow:
                         and not (self.auth and name == self.auth["login_operation"])
                         for name in self.allowed),
             "bindings": any(self.binding_rules.get(name) for name in self.allowed),
-            "credential_ref": any(catalog.operations[name]["security"]
-                                  and name not in self.anonymous_operations
+            "credential_ref": any(self.auth_mode(name) == 'authenticated'
                                   for name in self.allowed),
         }
         for field, needed in applicable.items():
@@ -309,7 +389,7 @@ class CatalogWorkflow:
                     "type": "array",
                     "items": scalar,
                     "minItems": 1,
-                    "maxItems": 4,
+                    "maxItems": 128,
                 },
             },
             "required": ["summary", "evidence_ids"],
@@ -401,8 +481,8 @@ class CatalogWorkflow:
             "omitted_sections": omitted,
         }
         private_body = bool(self.auth and op == self.auth["login_operation"])
-        authentication = ("anonymous_negative" if op in self.anonymous_operations else
-                          "credential_ref_required" if operation["security"] else "none")
+        authentication = ('credential_ref_required' if self.auth_mode(op) == 'authenticated'
+                          else self.auth_mode(op))
         data["input_requirements"] = {
             "parameters": [p["name"] for p in operation["parameters"] if p["required"]],
             "body": "application_supplied" if private_body else "user_required" if operation.get("requestBody", {}).get("required") else "none",
@@ -417,7 +497,7 @@ class CatalogWorkflow:
         no_inputs = (
             not any(p["required"] for p in operation["parameters"])
             and (private_body or not operation.get("requestBody", {}).get("required"))
-            and (not operation["security"] or op in self.anonymous_operations)
+            and self.auth_mode(op) != 'authenticated'
         )
         data["input_readiness"] = "ready" if no_inputs else "needs_inputs_or_auth"
         if no_inputs and not private_body:
@@ -458,6 +538,23 @@ class CatalogWorkflow:
             else:
                 return "required"
         return {"type": "function", "function": {"name": chosen}}
+
+    def next_occurrence(self, exchanges):
+        """Последовательный manifest принят приложением до первого HTTP."""
+        done = {e.get('occurrence_id') for e in exchanges if e.get('outcome') == 'received'}
+        return next((s for s in self.occurrences if s['id'] not in done), None)
+
+    def phase_decision(self, run, registry):
+        offered = self.phase_registry(run, registry)
+        choice = self.next_tool(run)
+        names = {t['function']['name'] for t in offered}
+        if isinstance(choice, dict) and choice['function']['name'] not in names:
+            # Checks уже оценены; повторный inspect не возвращает HTTP права.
+            partial = any(((s.get('observation') or {}).get('data') or {}).get('response_body_complete') is False
+                          for s in run.get('steps', []))
+            preferred = 'read_response' if partial and 'read_response' in names else 'finish_run'
+            choice = {'type': 'function', 'function': {'name': preferred}} if preferred in names else 'required'
+        return PhaseDecision(offered, choice)
 
     def run_registry(self, run, registry):
         """Зафиксировать инструменты после preflight, без лишнего поиска.
@@ -642,6 +739,11 @@ class CatalogWorkflow:
             exchange["outcome"] == "received"
             and validation["contract_verdict"] == "pass"
         ):
+            if self.auth and exchange['operation_id'] == self.auth['login_operation']:
+                # Actor задаёт приложение; token никогда не является его именем.
+                session.state.begin_auth('configured_account')
+                session.run['auth_state'] = {'auth_epoch': session.state.auth_epoch,
+                                            'principal': session.state.principal}
             for path in self.extraction.get(exchange["operation_id"], {}):
                 values.append(session.state.remember(exchange, path))
         data = {
@@ -698,12 +800,14 @@ class CatalogWorkflow:
                 and v["operation_id"] == self.auth["login_operation"]
                 and v["path"] == self.auth["token_path"]
             ]
-            if not bindings and not (op["security"] and auth_refs):
+            auth_refs = [v['ref'] for v in public if v.get('auth_epoch') == session.state.auth_epoch
+                         and v.get('principal') == session.state.principal and v['ref'] in auth_refs]
+            if not bindings and not (self.auth_mode(name) == 'authenticated' and auth_refs):
                 continue
             ready = (
                 all(p["name"] in bindings for p in op["parameters"] if p["required"])
                 and not op.get("requestBody", {}).get("required")
-                and (not op["security"] or bool(auth_refs))
+                and (self.auth_mode(name) != 'authenticated' or bool(auth_refs))
             )
             hint = {
                 "operation_id": name,
@@ -712,7 +816,7 @@ class CatalogWorkflow:
             }
             if bindings:
                 hint["bindings"] = bindings
-            if op["security"] and auth_refs:
+            if self.auth_mode(name) == 'authenticated' and auth_refs:
                 hint["credential_refs"] = auth_refs
             hints.append(hint)
             if len(hints) == 3:
@@ -878,6 +982,12 @@ class CatalogWorkflow:
         from ..validation.selection_scope import applicable
         latest = {v["operation_id"]: v for v in validations if applicable(v)}
         checked = {name for name, v in latest.items() if v["task_postcondition"]}
+        if self.occurrences:
+            by_exchange = {v['exchange_id']: v for v in validations}
+            for slot in self.occurrences:
+                matching = [e for e in session.exchanges if e.get('occurrence_id') == slot['id']]
+                if not matching or any(not by_exchange.get(e['id'], {}).get('task_postcondition') for e in matching):
+                    return 'not_checked'
         if not set(self.conditions) <= checked or len(validations) != len(
             session.exchanges
         ):
@@ -893,7 +1003,7 @@ class CatalogWorkflow:
                 return "fail"
         return (
             "fail"
-            if any(latest[name]["intent_verdict"] == "fail" for name in self.conditions)
+            if any(v['operation_id'] in self.conditions and applicable(v) and v['intent_verdict'] == 'fail' for v in validations)
             else "pass"
         )
 
@@ -914,6 +1024,7 @@ class CatalogSession(PolicySession):
             "spec_hash": catalog.spec_hash,
             "config_version": self.pinned["version"],
             "exclusions": deepcopy(workflow.excluded),
+            'occurrences': deepcopy(workflow.occurrences),
         }
 
     def admit(self, args):
@@ -923,10 +1034,18 @@ class CatalogSession(PolicySession):
 
             raise PolicyStop("uncertain_write")
         if self.requests >= self.max_requests:
-            raise ValueError("request_limit")
+            raise RequestLimitExceeded("request_limit")
         self.workflow.decision("execute_operation", args)
         name = args["operation_id"]
         op = self.catalog.operations[name]
+        slot = self.workflow.next_occurrence(self.exchanges)
+        if self.workflow.occurrences:
+            if slot is None or args.get('occurrence_id') != slot['id'] or name != slot['operation_id']:
+                raise ValueError('occurrence_denied')
+            if any(args.get(k) != slot[k] for k in ('body', 'parameters') if k in slot):
+                raise ValueError('occurrence_inputs_changed')
+        elif 'occurrence_id' in args:
+            raise ValueError('unexpected_occurrence')
         supplied = deepcopy(args.get("parameters", {}))
         bindings = args.get("bindings", {})
         descriptors = {p["name"]: p for p in op["parameters"]}
@@ -973,6 +1092,7 @@ class CatalogSession(PolicySession):
                 or record is None
                 or record["operation_id"] != rule["source_operation"]
                 or record["path"] != rule["source_path"]
+                or ('source_occurrence' in rule and record.get('occurrence_id') != rule['source_occurrence'])
             ):
                 raise ValueError("binding_source_denied")
             supplied[key] = self.state.resolve(ref, descriptors[key]["schema"]["type"])
@@ -1044,7 +1164,10 @@ class CatalogSession(PolicySession):
         if encoded and len(encoded) > 16384:
             raise ValueError("request_body_limit")
         self._headers = {}
-        if op["security"] and name not in self.workflow.anonymous_operations:
+        mode = self.workflow.request_mode(name, slot)
+        self._request_principal = {'mode': mode, 'auth_epoch': self.state.auth_epoch,
+                                   'actor': None}
+        if mode == 'authenticated':
             ref = args.get("credential_ref")
             if ref is None:
                 raise CatalogArgumentsError("credential_ref_required", "credential_ref is required. First execute " + auth["login_operation"] + " with operation_id only; application supplies its private body. Then use the issued credential_ref. Never invent a token.")
@@ -1053,15 +1176,23 @@ class CatalogSession(PolicySession):
                 record is None
                 or record["operation_id"] != auth["login_operation"]
                 or record["path"] != auth["token_path"]
+                or record.get('auth_epoch') != self.state.auth_epoch
+                or record.get('principal') != self.state.principal
+                or self.state.principal is None
             ):
                 raise ValueError("auth_reference_denied")
+            self._request_principal['actor'] = self.state.principal
             self._headers = {
                 "Authorization": "Bearer "
                 + self.state.resolve(ref, "string", secret=True)
             }
         elif "credential_ref" in args:
             raise ValueError("unexpected_auth_reference")
-        action = (name, path, encoded)
+        from .admission import admit_conditions
+        admit_conditions(self, name, args, supplied, body)
+        epoch = (self.state.auth_revocations if auth and name == auth['login_operation']
+                 else self.state.auth_epoch if mode == 'authenticated' else self.state.auth_revocations)
+        action = (name, path, encoded, mode, epoch)
         if action in self.actions:
             raise ValueError("duplicate_semantic_action")
         self._request_parameters = deepcopy(supplied)
@@ -1069,15 +1200,22 @@ class CatalogSession(PolicySession):
 
     def execute(self, args):
         exchange = super().execute(args)
+        exchange['request_principal'] = deepcopy(self._request_principal)
+        if self.workflow.occurrences:
+            exchange['occurrence_id'] = args['occurrence_id']
         exchange["bound_inputs"] = deepcopy(self._bound_inputs)
         name = exchange['operation_id']
         actual = deepcopy(self._request_parameters)
         exchange['request_parameters'] = actual
-        exchange['initial_request_parameters'] = deepcopy(self._selection_anchors.setdefault(name,actual))
+        anchor = args.get('occurrence_id', name)
+        exchange['initial_request_parameters'] = deepcopy(self._selection_anchors.setdefault(anchor,actual))
         if (
             self.workflow.auth
             and args["operation_id"] == self.workflow.auth["login_operation"]
         ):
             exchange["request"].pop("json", None)
             exchange["request"]["credential_body_omitted"] = True
+        if name in (self.workflow.auth or {}).get('logout_operations', []):
+            self.state.invalidate_auth()
+            self.run['auth_state'] = {'auth_epoch': self.state.auth_epoch, 'principal': self.state.principal}
         return exchange

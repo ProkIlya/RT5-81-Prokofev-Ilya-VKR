@@ -169,3 +169,24 @@ Read-only CLI не открывает target/model, не создаёт отсу
 
 
 Второй кандидат — `unsloth/Qwen3.5-4B-GGUF`, `IQ4_XS`, revision `e87f176479d0855a907a41277aca2f8ee7a09523`; SHA256 `658a9e7e406deb06d0179755e3c14f6a82915a4be4962a2f92a64d948d2e572f`. Для него в команде runtime замените путь на `./models/Qwen3.5-4B/Qwen3.5-4B-IQ4_XS.gguf`, `-ngl 24` на `-ngl 99`, а имя в CLI на `Qwen3.5-4B-IQ4_XS`. Проверено 33/33 GPU layers при context8192 на этом GTX1060. Объяснения STAND-37 согласованы в шести прогонах, однако дополнительный библиотечный сценарий не пройден; кандидат не выбран основным автоматически. Профиль и подробные результаты локальные: `experiments/local_model/qwen35-4b-lock.json`, `docs/reports/S08/model-comparison-2026-10-15.md`.
+
+## S09a: проверяемые факты Project
+
+При SQLite-финализации приложение автоматически сохраняет поддержанные проверенные факты: `declared_contract`, `response_observation`, `create_read_link`. Proposal содержит тип, источник, operation ID и закрытый verify descriptor; обмены и принятые условия читаются из собственной закреплённой истории. Модель не передаёт готовый VERIFIED или произвольный текст памяти. Ошибочное содержание, чужой Run/Project, неполный или маскированный результат не подтверждают факт. Источники INFERRED/USER_PROVIDED остаются CANDIDATE.
+
+Application API: `SQLiteHistory.propose_fact(project, session, run_id, descriptor)` и `read_facts(project, catalog=...)`. Чтение не вызывает HTTP/LLM и доступно любой сессии того же Project. По умолчанию возвращаются только актуальные VERIFIED; `include_inactive=True` показывает также кандидатов, конфликты, STALE и INVALIDATED. Исходное значение и evidence сохраняются при явном `invalidate_fact`, который требует сопоставимого опровергающего HTTP.
+
+```python
+from api_agent.openapi import load_source
+from api_agent.storage import SQLiteHistory
+
+catalog = load_source("tests/fixtures/demo_openapi.json")
+with SQLiteHistory("history.sqlite3", read_only=True) as history:
+    facts = history.read_facts("my-project", catalog=catalog, operation_ids=["getPet"])
+```
+
+Наблюдения и связи имеют настраиваемый TTL по типу внутри Project/среды: начальный профиль — 3600 секунд для обоих типов. `configure_fact_policy(project, response_observation=..., create_read_link=...)` изменяет профиль; увеличение TTL не продлевает старые наблюдения. Срок отсчитывается консервативно от начала исходного Run. После настоящего сброса стенда приложение вызывает `advance_fact_epoch(project)`; неизвестный внешний reset автоматически не обнаруживается. Декларации зависят от operation hash. Старые версии схемы SQLite мигрируются при записи; read-only история v1 читается без миграции и возвращает пустой список фактов.
+
+Минимальный create/read validator поддерживает явное публичное extraction/binding, один path ID и поля create body на тех же путях корневого read object. Он проверяет фактический URL, request parameter, response ID, содержимое и schemas двух exchanges одного Run. Числовой ID не записывается как долговременное значение связи. Неподдержанные формы не получают VERIFIED. Общий поиск исторических сущностей, передача фактов модели и полный сценарий STAND-34 относятся к последующим срезам S09; S09a предоставляет проверяемый application/storage API.
+
+Проверки: `python scripts/check_stage.py S09a good` (0), `python scripts/check_stage.py S09a bad` (2 при обнаруженных нарушениях; подготовка/сбой проверки — 1). Evidence сохраняется в `evidence/S09/`; технические проверки используют controlled model и настоящий Demo HTTP/SQLite, не являются полной серией STAND-37.

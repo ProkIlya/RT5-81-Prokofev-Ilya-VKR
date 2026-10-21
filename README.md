@@ -221,3 +221,22 @@ Project config предварительно создаётся и одобряе
 В малой парной серии на закреплённых HTTP-свидетельствах локальная LLM исправила 3/10 проблемных drafts без диагноста и 4/10 с ним, при нуле вызовов для 5 корректных drafts в каждом варианте. Время — 18,109/45,142 s, токены — 6774/16294; непроверенные коррекции заменены каноническим ответом. Диагност не выполнил заранее заданное условие роста времени ≤2× и остаётся опцией. Это answer-only replay, source primary/generator controlled, не полный STAND-37 и не оценка понимания произвольной прозы.
 
 Проверки: `python scripts/check_stage.py S09c good|bad` (0/2; сбой подготовки или проверки —1). Методика сравнения: сначала `python scripts/evaluate_answer_feedback.py --phase pilot --output <новый каталог>`, затем зафиксировать thresholds JSON и выполнить `--phase series --thresholds <файл> --output <новый каталог>`. Нужен прежний локальный llama-server18081; модель не скачивается. Кодовый workspace, compaction и полное сравнение остаются следующими срезами.
+
+## S09d1: подготовка SDK для Project/spec
+
+Детерминированный builder подготавливает SDK без цели, LLM и API HTTP. Укажите прежнюю одобренную конфигурацию с совпадающим spec:
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m api_agent.workspace_sdk --spec tests/fixtures/chain_openapi.json --project-config config/project.json --output evidence/sdk
+python scripts/check_stage.py S09d1 good
+python scripts/check_stage.py S09d1 bad
+```
+
+В `<output>/<artifact_hash>/` сохраняются `manifest.json` и `sdk.py`. Повтор той же сборки использует прежний артефакт, другая версия остаётся в отдельном каталоге. Manifest содержит spec/config/operation hashes, версии builder/profile/metadata, mapping имён и исключения неразрешённых операций. `SdkArtifact.load(directory, expected_hash=...)` проверяет закреплённый приложением hash и оба файла. Изменённый контракт требует пересмотра Project config; правка description меняет metadata/artifact hash, сохраняя execution hash.
+
+Функции имеют настоящие keyword-only сигнатуры: например, `api.readOrder(path__order_id=7)`. Path/query/header разделены префиксами, JSON body — аргумент `body`, ответы — обычные значения dispatcher. Необычные имена и коллизии получают стабильные aliases с обратным mapping. SDK не коэрцирует типы, не создаёт credentials и не делает HTTP самостоятельно: входы и права проверяет внешний broker.
+
+В facade есть локальные `list_operations`, `search`, `describe` и сообщения приложения `ask_user(question, input_slot=...)`, `check_goal()`, `propose_fact(descriptor)`, `finish(summary, claims=..., answer_fields=...)`. Они не присваивают VERIFIED/PASS/approval. Discovery всех разрешённых операций доступен без RPC; большие схемы читаются секциями/JSON Pointer с явными omissions. Описания, включая refs/fields/parameters, хранятся как недоверенные metadata отдельно от validation basis. Byte limits metadata не являются измерением токенов.
+
+S09d1 проверяет builder и протокол facade через controlled dispatcher. Sandbox, broker, пользовательский `execute_code`, Run namespace и live code-agent pilot относятся к S09d2–3; SDK не запускает код модели в процессе приложения. Весь S09d этим не закрыт.

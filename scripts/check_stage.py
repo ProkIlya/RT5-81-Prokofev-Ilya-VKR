@@ -119,6 +119,9 @@ def post_stream(payload):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == 'S09d1' and sys.argv[2] in ('good', 'bad'):
+        from scripts.check_workspace_sdk import main as sdk_main
+        return sdk_main(sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] == 'S09c' and sys.argv[2] in ('good', 'bad'):
         from scripts.check_answer_feedback import main as answer_main
         return answer_main(sys.argv[2])

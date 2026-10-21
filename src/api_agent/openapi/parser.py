@@ -39,6 +39,12 @@ def canonical(value):
     ).encode("utf-8")
 
 
+def _annotation(text):
+    """Hash полного описания отличает изменения за пределами видимого фрагмента."""
+    return {'text': text[:2048], 'characters_total': len(text), 'truncated': len(text) > 2048,
+            'text_hash': hashlib.sha256(text.encode()).hexdigest()}
+
+
 def pointer_part(value):
     return value.replace("~", "~0").replace("/", "~1")
 
@@ -72,6 +78,12 @@ class Catalog:
 
     _snapshot: bytes
     _metadata: bytes = b"{}"
+    _documentation: bytes = b"{}"
+
+    @property
+    def documentation(self):
+        """Недоверенные описания отдельно от execution snapshot и оснований."""
+        return json.loads(self._documentation)
 
     @property
     def search_metadata(self):
@@ -151,6 +163,7 @@ class Parser:
         self.nodes = 0
         self.version = document.get("openapi")
         self.components = document.get("components", {})
+        self.annotations = {}
 
     def walk(self, value, kind, path, stack=(), depth=0, secret=False):
         """Проверить boundary до рекурсии; раскрытая ссылка наследует secret scope."""
@@ -182,7 +195,11 @@ class Parser:
             "responses": self.response,
             "securitySchemes": self.security_scheme,
         }
-        return handlers[kind](value, path, stack, depth, secret)
+        result = handlers[kind](value, path, stack, depth, secret)
+        if isinstance(value.get('description'), str):
+            text = value['description']
+            self.annotations[path + '/description'] = _annotation(text)
+        return result
 
     def schema(self, value, path, stack, depth, secret):
         object_keys(
@@ -460,6 +477,7 @@ class Parser:
             raise OpenApiError("invalid_operation", "/paths")
         operations = {}
         search_metadata = {}
+        documentation = {}
         templates = set()
         for path, item in paths.items():
             p = "/paths/" + pointer_part(path)
@@ -553,6 +571,15 @@ class Parser:
                 summary = value.get("summary", "")
                 if isinstance(summary, str):
                     search_metadata[name] = {"summary": " ".join(summary.split())[:160]}
+                annotations = {key: val for key, val in self.annotations.items()
+                    if key.startswith(op_path + '/') or key.startswith(p + '/parameters/')}
+                for key in ('summary', 'description'):
+                    if key in item: annotations[p + '/' + key] = _annotation(item[key])
+                for key in ('summary', 'description'):
+                    if key in value:
+                        text = value[key]
+                        annotations[op_path + '/' + key] = _annotation(text)
+                documentation[name] = annotations
                 if len(operations) > 128:
                     raise OpenApiError("limits", "/paths")
         return Catalog(
@@ -565,6 +592,7 @@ class Parser:
                 }
             ),
             canonical(search_metadata),
+            canonical(documentation),
         )
 
 

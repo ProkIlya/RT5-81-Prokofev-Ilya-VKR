@@ -727,7 +727,20 @@ def report(run):
         goal_checklist = check_goal(accepted, Catalog(canonical(run['contract'])), run)
         goal_verdict = ('FAIL' if checks_verdict == 'FAIL' or goal_checklist['verdict'] == 'FAIL' else
                         'PASS' if run['status'] == 'completed' and goal_checklist['verdict'] == 'PASS' else 'UNKNOWN')
+        if reason == 'finished':
+            summary = {'PASS': 'Цель подтверждена.', 'FAIL': 'Обнаружено несоответствие принятым условиям.',
+                       'UNKNOWN': 'Цель не подтверждена полностью.'}[goal_verdict]
+    answer = None
+    if goal_checklist is not None:
+        from ..answer_feedback import build_feedback
+        answer = build_feedback({**run, 'report': {'goal_verdict': goal_verdict, 'goal_checklist': goal_checklist,
+            'contract_verdict': result.get('contract_verdict', 'not_checked')}})
     return {
+        **({'answer': answer} if answer is not None else {}),
+        **({'answer_review': {'status': run['answer_feedback']['status'],
+            'diagnostic': run['answer_feedback']['diagnostic']['status'],
+            'revision': run['answer_feedback']['revision']['status'], 'calls': run['answer_feedback']['calls']}}
+            if 'answer_feedback' in run else {}),
         **({'goal_checklist': goal_checklist} if goal_checklist is not None else {}),
         "summary": summary,
         "checks_verdict": checks_verdict,

@@ -86,7 +86,7 @@ def generator_payload(catalog, config, goal, *, metadata_ids=None, version=1):
 class GoalApplication:
     """Durable preparation запрещает скрытый повтор generator после отказа/crash."""
     def __init__(self, target, catalog, config, *, history, generator, human=None, limits=None,
-                 token_counter=None, mappings=None, current_config=None, trace_sink=None, event_sink=None):
+                 token_counter=None, mappings=None, current_config=None, trace_sink=None, event_sink=None, answer_diagnostic=False):
         if target != config.snapshot['target'] or config.snapshot['spec_hash'] != catalog.spec_hash:
             raise ValueError('goal_config_scope_mismatch')
         self.target, self.catalog, self.config, self.history, self.generator = target, catalog, config, history, generator
@@ -94,6 +94,8 @@ class GoalApplication:
         self.token_counter = token_counter or getattr(generator, 'count_tokens', None)
         self.mappings, self.current_config = deepcopy(mappings or {}), current_config
         self.trace_sink, self.event_sink = trace_sink, event_sink
+        if type(answer_diagnostic) is not bool: raise ValueError('invalid_answer_diagnostic')
+        self.answer_diagnostic = answer_diagnostic
         self._lock = threading.Lock()
 
     def _safe(self, value):
@@ -222,7 +224,8 @@ class GoalApplication:
                 if any(decision(self.config.snapshot, s['operation_id'], self.catalog.operation_hashes[s['operation_id']]) == 'DENY' for s in accepted.snapshot['slots']):
                     raise ValueError('policy_denied')
                 workflow = GoalWorkflow(self.catalog, self.config, accepted, proposal=proposal, human=self.human,
-                    budget=budget, preparation=preparation, current_config=self.current_config, **self.mappings)
+                    budget=budget, preparation=preparation, current_config=self.current_config,
+                    answer_diagnostic=self.answer_diagnostic, **self.mappings)
                 workflow._snapshot_metadata = self.history.goal_project_metadata(self.config, workflow.storage_metadata())
                 preparation['status'] = 'accepted'
                 self._save(project, session, message, preparation)

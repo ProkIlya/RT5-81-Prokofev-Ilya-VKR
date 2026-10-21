@@ -19,12 +19,13 @@ class GoalWorkflow(CatalogWorkflow):
     application_tools = {'check_goal', 'ask_user'}
 
     def __init__(self, catalog, config, accepted, *, proposal, human, budget, preparation,
-                 extraction=None, binding_rules=None, auth=None, private_bodies=None, current_config=None):
+                 extraction=None, binding_rules=None, auth=None, private_bodies=None, current_config=None, answer_diagnostic=False):
         self.accepted, self.human, self.preparation_budget = accepted, human, budget
         self.preparation = deepcopy(preparation)
         self.preparation_active = preparation.get('active_seconds', 0)
         self.private_bodies = deepcopy(private_bodies or {})
         self.inputs = {}
+        self.answer_diagnostic = answer_diagnostic
         manifest = accepted.snapshot
         conditions, occurrences = {}, []
         extraction, binding_rules = deepcopy(extraction or {}), deepcopy(binding_rules or {})
@@ -94,13 +95,20 @@ class GoalWorkflow(CatalogWorkflow):
         return deepcopy(metadata)
 
     def system(self):
-        return super().system() + ' Follow accepted occurrence slots exactly. Use check_goal for the application checklist. ask_user can fill only a declared typed input; new requirements need a new Run.'
+        return super().system() + (' Follow accepted occurrence slots exactly. Use check_goal for the application checklist. '
+            'ask_user can fill only a declared typed input; new requirements need a new Run. '
+            'finish_run should include claims:[{condition_id,verdict:PASS|FAIL|UNKNOWN}] for every accepted condition '
+            'and answer_fields:{answer_id:actual_value} from check_goal. A completed diagnostic task may have FAIL conditions.')
 
     def initial_context(self, run, counter, **kwargs):
         return super().initial_context(run, counter, **kwargs) + '\nAccepted goal: ' + json.dumps(self.accepted.snapshot, ensure_ascii=False)
 
     def registry(self, catalog):
-        return super().registry(catalog) + [
+        from .answer_feedback import CLAIM_SCHEMA
+        registry = super().registry(catalog)
+        finish = next(t['function']['parameters'] for t in registry if t['function']['name'] == 'finish_run')
+        finish['properties'].update(claims=deepcopy(CLAIM_SCHEMA), answer_fields={'type': 'object'})
+        return registry + [
             _tool('check_goal', {}, [], 'Check accepted requirements using saved evidence only, no HTTP.'),
             _tool('ask_user', {'question': {'type': 'string', 'maxLength': 2000}, 'input_slot': {'type': 'string'}},
                   ['question', 'input_slot'], 'Fill a previously accepted typed input slot; cannot change requirements.')]

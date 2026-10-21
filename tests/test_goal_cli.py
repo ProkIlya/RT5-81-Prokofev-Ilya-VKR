@@ -30,15 +30,24 @@ class GoalCliTests(unittest.TestCase):
             def model(payload):
                 calls.append(payload)
                 if payload['tools'][0]['function']['name'] == 'propose_goal': return reply('propose_goal', pet_proposal(cat, cfg, goal))
+                if payload['tools'][0]['function']['name'] == 'diagnose_answer':
+                    signal = json.loads(payload['messages'][-1]['content'])['signals'][0]
+                    return reply('diagnose_answer', {'issues': [{'feedback_id': signal['id'],
+                        'condition_id': signal['condition_id'], 'evidence_ids': signal['evidence_ids'],
+                        'explanation': 'Пропущены структурированные утверждения.', 'recommendation': 'Заполнить их.', 'hypothesis': None}]})
+                if payload['tools'][0]['function']['name'] == 'revise_answer':
+                    return reply('revise_answer', {'claims': [{'condition_id': 'c1', 'verdict': 'PASS'}], 'answer_fields': {'a1': 'Murka'}})
                 return PrimaryModel()(payload)
             argv = [goal, '--generate-goal', '--project-config', str(config_path), '--target', server.target,
-                    '--spec', str(ROOT / 'tests/fixtures/demo_openapi.json'), '--evidence-dir', folder, '--message-id', 'm']
+                    '--spec', str(ROOT / 'tests/fixtures/demo_openapi.json'), '--evidence-dir', folder, '--message-id', 'm', '--answer-diagnostic']
             reader = lambda request: {'request_id': request['id'], 'value': 'yes'}
             with redirect_stdout(io.StringIO()) as output:
                 code = main(argv, model=model, token_counter=count_test_tokens, human_reader=reader)
             self.assertEqual(code, 0, output.getvalue())
             first = json.loads(output.getvalue())
             self.assertEqual(first['report']['goal_verdict'], 'PASS')
+            self.assertEqual(first['report']['answer_review']['status'], 'corrected')
+            self.assertEqual(first['report']['answer_review']['diagnostic'], 'advisory')
             count = len(calls)
             with redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(main(argv, model=model, token_counter=count_test_tokens, human_reader=reader), 0)

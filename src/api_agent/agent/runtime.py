@@ -547,9 +547,11 @@ class StartAgentRun:
             self._active_state = session.state
             run["validations"] = []
             run["chain_verdict"] = "not_checked"
+        budget = getattr(self.workflow, 'preparation_budget', None) or TokenBudget(
+            self.limits, self.token_counter or getattr(model, 'count_tokens', None))
         try:
             if run["stop_reason"] is None:
-                self._drive_loop(run, model, cancel, session, started, prepared)
+                self._drive_loop(run, model, cancel, session, started, prepared, budget)
         except Exception:
             run["stop_reason"] = "runtime_error"
             run["status"] = "failed"
@@ -590,6 +592,26 @@ class StartAgentRun:
             run["stop_category"] = stop_category(run)
             run["resources"]["wall_seconds"] = run["wall_seconds"]
             run["report"] = self.safe(report(run))
+            if (run.get('admission_manifest') or {}).get('goal_contract'):
+                from ..answer_feedback import correct_answer
+                try:
+                    correct_answer(run, model, budget, deadline=started + self.limits.max_seconds,
+                        clock=self.clock, cancel=cancel, diagnostic=getattr(self.workflow, 'answer_diagnostic', False),
+                        safe=self.safe, persist=lambda: self._persist_snapshot(run))
+                except Exception:
+                    # Ошибка пояснения не меняет проверенный исход API.
+                    run['answer_feedback'] = {'status': 'canonical', 'calls': 0,
+                        'diagnostic': {'status': 'unavailable'}, 'revision': {'status': 'unavailable'}}
+                run['wall_seconds'] = self.clock() - started
+                run['resources']['wall_seconds'] = run['wall_seconds']
+                run['elapsed_wall_seconds'] = run['wall_seconds'] + run.get('human_wait_seconds', 0)
+                run['total_model_calls'] = budget.calls
+                run['report'] = self.safe(report(run))
+                if run.get('final'):
+                    run['final'].update(summary=run['report']['summary'],
+                        claims=[{'condition_id': c['condition_id'], 'verdict': c['verdict']}
+                            for c in run['report']['answer']['conditions']],
+                        answer_fields=deepcopy(run['report']['answer']['answer_fields']))
             if self.summary_reviewer is not None:
                 # Новый контекст без API tools; тот же deadline и total budget.
                 # Диагноз LLM не получает права переписать validation/вердикт.
@@ -694,7 +716,7 @@ class StartAgentRun:
             run.update(status="failed", stop_reason="journal_error")
             return False
 
-    def _drive_loop(self, run, model, cancel, session, started, prepared):
+    def _drive_loop(self, run, model, cancel, session, started, prepared, budget):
         """Последовательная dispatch boundary: форма → права → бюджет → эффект.
 
         Каждая попытка учитывается до вызова. Счётчик повторов проверяется до
@@ -761,7 +783,6 @@ class StartAgentRun:
             registry = self.workflow.run_registry(run, registry)
         run["history"] = history
         counter = self.token_counter or getattr(model, "count_tokens", None)
-        budget = getattr(self.workflow, 'preparation_budget', None) or TokenBudget(self.limits, counter)
         run["resources"] = budget.snapshot()
         seen, repeats = set(), {}
         expectations_hash = fingerprint(run["expectations"])

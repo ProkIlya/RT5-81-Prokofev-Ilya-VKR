@@ -24,6 +24,7 @@ def main(argv=None, *, model=None, token_counter=None, human_reader=None):
     parser.add_argument("goal")
     parser.add_argument('--generate-goal', action='store_true', help='S09b: one generator, compiler and explicit semantic acceptance')
     parser.add_argument('--confirm-goal', action='store_true', help='Confirm every generated interpretation')
+    parser.add_argument('--answer-diagnostic', action='store_true', help='S09c: one optional advisory diagnostic before answer correction')
     parser.add_argument('--human-timeout', type=float, default=120, help='Human response timeout, separate from active Run time')
     parser.add_argument("--workflow", choices=("create-read", "auth-read"))
     parser.add_argument(

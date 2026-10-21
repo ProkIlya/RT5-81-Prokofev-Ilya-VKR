@@ -16,7 +16,7 @@ from .validation import fingerprint
 
 
 def run_goal_cli(args, catalog, directory, sink, *, model, token_counter, cancel, reader=None):
-    if not args.project_config or args.workflow or args.conditions or args.goal_checks or args.credentials_file:
+    if not args.project_config or args.workflow or args.conditions or args.goal_checks or args.credentials_file or args.review_summary:
         raise ValueError('conflicting_generated_goal_options')
     config = ProjectConfig.load(args.project_config, catalog)
     if args.project_id and args.project_id != config.snapshot['project_id']: raise ValueError('foreign_project')
@@ -68,7 +68,8 @@ def run_goal_cli(args, catalog, directory, sink, *, model, token_counter, cancel
             limits = replace(limits, **values)
             local = model or LocalModel(args.llm_target)
             app = GoalApplication(args.target, catalog, config, history=history, generator=local, human=human,
-                token_counter=token_counter, limits=limits, mappings=mappings, trace_sink=sink, event_sink=JsonlJournal(directory))
+                token_counter=token_counter, limits=limits, mappings=mappings, trace_sink=sink, event_sink=JsonlJournal(directory),
+                answer_diagnostic=args.answer_diagnostic)
             result = app.start(project, session, message, args.goal, local, parent_run_id=args.parent_run_id,
                                force_confirmation=args.confirm_goal)
             print(json.dumps(result, ensure_ascii=False))

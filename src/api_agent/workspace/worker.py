@@ -7,7 +7,7 @@ import sys
 
 # Изолированный Python не добавляет каталог скрипта в sys.path.
 sys.path.insert(0, '/runtime')
-from api_agent.workspace_sdk import SdkArtifact
+from api_agent.workspace.sdk import SdkArtifact
 
 
 class CallDenied(ValueError): pass

@@ -5,11 +5,11 @@ import threading
 import time
 import uuid
 
-from .agent.catalog import CatalogLimits
-from .bounded_json import validate_tree
-from .openapi.parser import canonical
-from .validation import fingerprint, validate_exchange, report
-from .workspace_sdk import SdkArtifact, BUILDER_VERSION
+from ..agent.catalog import CatalogLimits
+from ..bounded_json import validate_tree
+from ..openapi.parser import canonical
+from ..validation import fingerprint, validate_exchange, report
+from .sdk import SdkArtifact, BUILDER_VERSION
 
 ERROR_CODES = set(('artifact_denied protocol_denied operation_denied invalid_parameters ambiguous_parameter_name '
     'binding_source_denied auth_reference_denied occurrence_denied occurrence_inputs_changed unexpected_occurrence '
@@ -206,7 +206,7 @@ class WorkspaceBroker:
             source = next((e for e in self.session.exchanges if e['id'] == refs[0]['exchange_id']), None)
             checked = next((v for v in self.run['validations'] if v['exchange_id'] == refs[0]['exchange_id']), {})
             principal = source.get('request_principal', {}) if source else {}
-            from .validation.selection_scope import applicable
+            from ..validation.selection_scope import applicable
             if (source is None or source['outcome'] != 'received' or checked.get('contract_verdict') != 'pass'
                 or checked.get('intent_verdict') != 'pass' or not checked.get('task_postcondition') or not applicable(checked)
                 or (principal.get('mode') == 'authenticated' and (principal.get('auth_epoch') != self.session.state.auth_epoch

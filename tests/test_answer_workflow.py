@@ -8,8 +8,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'src'), str(ROOT / 'tests'), str(ROOT)]
-from api_agent.goal_application import GoalApplication
-from api_agent.interaction import HumanInteraction
+from api_agent.goals.application import GoalApplication
+from api_agent.goals.interaction import HumanInteraction
 from api_agent.openapi import load_source
 from api_agent.policy import ProjectConfig
 from api_agent.storage import SQLiteHistory
@@ -105,7 +105,7 @@ class AnswerWorkflowTests(unittest.TestCase):
 
     def test_expected_401_is_a_successful_condition_without_false_alarm(self):
         from test_goal_auth import GoalAuthTests
-        from api_agent.answer_feedback import correct_answer
+        from api_agent.goals.feedback import correct_answer
         import threading
         fixture = GoalAuthTests()
         try:

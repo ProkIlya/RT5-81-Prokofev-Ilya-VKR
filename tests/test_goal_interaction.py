@@ -12,8 +12,8 @@ sys.path[:0] = [str(ROOT / 'src'), str(ROOT / 'tests'), str(ROOT)]
 
 class InteractionTests(unittest.TestCase):
     def cls(self):
-        self.assertIsNotNone(importlib.util.find_spec('api_agent.interaction'), 'Нет application ask/private input')
-        from api_agent.interaction import HumanInteraction
+        self.assertIsNotNone(importlib.util.find_spec('api_agent.goals.interaction'), 'Нет application ask/private input')
+        from api_agent.goals.interaction import HumanInteraction
         return HumanInteraction
 
     def test_phase_budgets_are_separate_and_approval_does_not_consume_ask(self):

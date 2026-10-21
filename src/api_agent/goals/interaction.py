@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 
-from .bounded_json import validate_tree
+from ..bounded_json import validate_tree
 
 
 class HumanInteraction:

@@ -15,7 +15,7 @@ from api_agent.agent.catalog import CatalogWorkflow, CatalogLimits
 from api_agent.openapi import parse_document
 from api_agent.policy import ProjectConfig
 from api_agent.storage.history import SQLiteHistory
-from api_agent.workspace_sdk import build_sdk
+from api_agent.workspace.sdk import build_sdk
 from demo_api.server import DemoServer
 from test_catalog_execution import status_condition
 
@@ -48,9 +48,9 @@ class WorkspaceBrokerTests(unittest.TestCase):
             self.assertNotIn(secret, '\n'.join(history.db.iterdump()))
 
     def test_application_ask_fills_only_accepted_input_and_locks_after_http(self):
-        from api_agent.goal_workflow import GoalWorkflow
-        from api_agent.goals import compile_goal
-        from api_agent.interaction import HumanInteraction
+        from api_agent.goals.workflow import GoalWorkflow
+        from api_agent.goals.compiler import compile_goal
+        from api_agent.goals.interaction import HumanInteraction
         from api_agent.validation import fingerprint
         from test_goal_application import pet_proposal
         with tempfile.TemporaryDirectory() as directory, DemoServer() as server, SQLiteHistory(Path(directory) / 'h.db') as history:
@@ -133,9 +133,9 @@ class WorkspaceBrokerTests(unittest.TestCase):
             self.assertTrue(any(f['value'] == 'POST' and f['status'] == 'VERIFIED' for f in facts))
 
     def test_accepted_occurrences_auth_epochs_and_hidden_bearer_use_same_kernel(self):
-        from api_agent.goal_workflow import GoalWorkflow
-        from api_agent.goals import compile_goal
-        from api_agent.interaction import HumanInteraction
+        from api_agent.goals.workflow import GoalWorkflow
+        from api_agent.goals.compiler import compile_goal
+        from api_agent.goals.interaction import HumanInteraction
         from test_goal_auth import auth_catalog, auth_proposal
         with tempfile.TemporaryDirectory() as directory, DemoServer() as server, SQLiteHistory(Path(directory) / 'h.db') as history:
             catalog = auth_catalog()
@@ -269,8 +269,8 @@ class WorkspaceBrokerTests(unittest.TestCase):
             server.shutdown(); server.server_close(); thread.join()
 
     def module(self):
-        self.assertIsNotNone(importlib.util.find_spec('api_agent.workspace_broker'), 'Нет внешнего broker S09d2')
-        from api_agent import workspace_broker
+        self.assertIsNotNone(importlib.util.find_spec('api_agent.workspace.broker'), 'Нет внешнего broker S09d2')
+        from api_agent.workspace import broker as workspace_broker
         return workspace_broker
 
     def setup_broker(self, server, history, **options):

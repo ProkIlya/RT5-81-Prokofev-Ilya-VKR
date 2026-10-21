@@ -188,7 +188,7 @@ class FailureBoundaryTests(unittest.TestCase):
         self.assertNotIn("CANARY", json.dumps(snapshots))
 
     def test_unexpected_error_after_real_http_retains_exchange_and_duplicate(self):
-        from api_agent.first_http import Session
+        from api_agent.transport.http import Session
 
         body = b'{"id":1,"name":"CANARY"}'
         header = f"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode()

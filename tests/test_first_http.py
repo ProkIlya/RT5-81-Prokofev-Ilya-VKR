@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from api_agent.first_http import PolicyDenied, Session, load_catalog, run_goal
+from api_agent.transport.http import PolicyDenied, Session, load_catalog, run_goal
 from demo_api.server import DemoServer
 
 FIXTURE = Path(__file__).parent / "fixtures" / "demo_openapi.json"

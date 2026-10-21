@@ -11,7 +11,7 @@ sys.path[:0] = [str(ROOT / 'src'), str(ROOT / 'tests'), str(ROOT)]
 from api_agent.openapi import parse_document
 from api_agent.policy import ProjectConfig
 from api_agent.storage import SQLiteHistory
-from api_agent.interaction import HumanInteraction
+from api_agent.goals.interaction import HumanInteraction
 from api_agent.validation import fingerprint
 from agent_support import reply, count_test_tokens
 from demo_api.server import DemoServer
@@ -67,7 +67,7 @@ class AuthPlanModel:
 
 class GoalAuthTests(unittest.TestCase):
     def run_auth(self, *, occupied=False):
-        from api_agent.goal_application import GoalApplication
+        from api_agent.goals.application import GoalApplication
         folder = tempfile.TemporaryDirectory(); self.addCleanup(folder.cleanup)
         server = DemoServer(); server.__enter__(); self.addCleanup(server.__exit__, None, None, None)
         catalog = auth_catalog()

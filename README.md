@@ -228,7 +228,7 @@ Project config предварительно создаётся и одобряе
 
 ```powershell
 $env:PYTHONPATH = 'src;.'
-python -m api_agent.workspace_sdk --spec tests/fixtures/chain_openapi.json --project-config config/project.json --output evidence/sdk
+python -m api_agent.workspace.sdk --spec tests/fixtures/chain_openapi.json --project-config config/project.json --output evidence/sdk
 python scripts/check_stage.py S09d1 good
 python scripts/check_stage.py S09d1 bad
 ```
@@ -259,3 +259,16 @@ python scripts/check_stage.py S09d2 bad
 Начальные caps: один CPU, RAM128 MiB без swap и hard OS address-space128 MiB, PIDs32, tmpfs8 MiB, read-only filesystem, IPC/network none, блок20 s, код16 KiB, входящий IPC4 MiB за worker, frame512 KiB, stdout8 KiB, до24 блоков внутри бюджета Run. Дополнительный hard CPU-time limit равен max_seconds Run +1 секунде. HTTP transport остаётся64 KiB. JSON48000 characters проверяется внутри namespace с коротким stdout; размер Python-данных не равен токенам prompt. Первый блок и до трёх corrections без нового HTTP/finish; print не сбрасывает счётчик. После crash нет автоматического replay или восстановления Python objects.
 
 Raw code передаётся только в stdin; Docker logging/core dumps отключены. Отдельный пустой Docker CLI config исключает автоматическую передачу host proxy credentials в ENV worker. Для Run с классифицированными приватными inputs код и stdout в durable journal заменяются omissions, сохраняются execution ID/HMAC с несохраняемым ключом, размеры, typed errors и broker evidence. `propose_fact` проверяет собственный SQLite snapshot и публикуется при finalize. Private auth body подставляет broker: для required SDK body login используется `body=None`; собственный Bearer или credential_ref worker передать не может. Cleanup проверяет исчезновение контейнера и удаляет только созданный временный каталог.
+
+## Навигация по коду
+
+Runtime приложения находится в `src/api_agent/`. `tests/` содержит проверки, `scripts/` — команды разработчика для good/bad gates и измерений; при обычном запуске приложения они не исполняются. `demo_api/` — отдельный тестовый сервис.
+
+- `agent/runtime.py` — публичный StartAgentRun; `agent/execution/` — lifecycle, dispatch, контекст, model call и guards одного structured loop.
+- `agent/catalog/` — конфигурация workflow, metadata, schemas/tools, проекции ответов и admission session.
+- `agent/chains/` — доверенные create/read и auth/read профили и общий транспорт.
+- `openapi/` — immutable модель каталога, schemas/refs и parser; `validation/` — ожидания, JSON schema, HTTP verdict и итоговый отчёт.
+- `storage/` — Run/Message/events и typed Facts в одной SQLite history.
+- `goals/` — compiler, preparation, вопросы/CLI и answer feedback; `workspace/` — SDK/broker/sandbox/worker; `transport/` — HTTP и socket deadlines.
+
+Публичные входы agent/runtime/catalog/chains, validation, openapi и storage сохранены; внутренние импорты перемещённых модулей обновлены. Подробная локальная [карта исходного кода](docs/engineering/source-map.md) объясняет ответственность файлов и маршрут чтения для новых агентов. Python-модули в src/tests/scripts/demo_api ограничены 500 физическими строками; правило проверяет `python -m unittest discover -s tests -p test_module_size.py -v`.

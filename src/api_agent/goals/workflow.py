@@ -3,10 +3,10 @@ from copy import deepcopy
 import json
 import time
 
-from .agent.catalog import CatalogWorkflow, CatalogSession, PhaseDecision
-from .goals import check_goal, resolve_inputs, input_references
-from .policy import PolicyStop
-from .validation import fingerprint, schema_issues
+from ..agent.catalog import CatalogWorkflow, CatalogSession, PhaseDecision
+from .compiler import check_goal, resolve_inputs, input_references
+from ..policy import PolicyStop
+from ..validation import fingerprint, schema_issues
 
 
 def _tool(name, properties, required, description):
@@ -104,7 +104,7 @@ class GoalWorkflow(CatalogWorkflow):
         return super().initial_context(run, counter, **kwargs) + '\nAccepted goal: ' + json.dumps(self.accepted.snapshot, ensure_ascii=False)
 
     def registry(self, catalog):
-        from .answer_feedback import CLAIM_SCHEMA
+        from .feedback import CLAIM_SCHEMA
         registry = super().registry(catalog)
         finish = next(t['function']['parameters'] for t in registry if t['function']['name'] == 'finish_run')
         finish['properties'].update(claims=deepcopy(CLAIM_SCHEMA), answer_fields={'type': 'object'})

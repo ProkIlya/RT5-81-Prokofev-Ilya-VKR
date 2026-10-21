@@ -5,9 +5,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 import re
 
-from .bounded_json import validate_tree
-from .openapi.parser import canonical, pointer_get
-from .validation import fingerprint, schema_issues, prepare_expectations, validate_exchange
+from ..bounded_json import validate_tree
+from ..openapi.parser import canonical, pointer_get
+from ..validation import fingerprint, schema_issues, prepare_expectations, validate_exchange
 
 PREDICATES = {'status_in', 'json_value_equals', 'json_number_rounded', 'json_collection_matches', 'value_equal', 'response_schema'}
 PRIVATE_NAMES = {'password', 'token', 'secret', 'authorization', 'cookie', 'access_token', 'refresh_token'}

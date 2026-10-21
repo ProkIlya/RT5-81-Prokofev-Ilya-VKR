@@ -37,7 +37,7 @@ def load_catalog(path):
         raise PolicyDenied("fixture too large")
     data = json.loads(path.read_text(encoding="utf-8"))
     # Эталон хранится в Git; загрузчик не интерпретирует URL и не скачивает refs.
-    expected = Path(__file__).resolve().parents[2] / "tests/fixtures/demo_openapi.json"
+    expected = Path(__file__).resolve().parents[3] / "tests/fixtures/demo_openapi.json"
     canonical = json.loads(expected.read_text(encoding="utf-8"))
     if data != canonical:
         raise PolicyDenied(
@@ -175,7 +175,7 @@ class Session:
                         exchange["outcome"] = "incomplete_response"
                     else:
                         try:
-                            from .bounded_json import validate_tree
+                            from ..bounded_json import validate_tree
 
                             parsed = json.loads(
                                 b"".join(chunks), parse_constant=reject_json_constant

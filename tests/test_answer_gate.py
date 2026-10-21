@@ -20,7 +20,7 @@ class AnswerGateTests(unittest.TestCase):
     def test_blind_claim_acceptance_does_not_produce_expected_bad_two(self):
         gate = self.api()
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'S09_EVIDENCE_DIR': folder}), \
-                patch('api_agent.answer_feedback.check_claims', return_value=[]):
+                patch('api_agent.goals.feedback.check_claims', return_value=[]):
             self.assertEqual(gate.main('bad'), 1)
 
     def test_missing_test_is_execution_failure_not_bad_two(self):

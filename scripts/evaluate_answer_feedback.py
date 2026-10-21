@@ -18,9 +18,9 @@ sys.path[:0] = [str(ROOT / 'src'), str(ROOT)]
 from api_agent.agent.catalog import CatalogLimits
 from api_agent.agent.model import LocalModel
 from api_agent.agent.resilience import TokenBudget
-from api_agent.answer_feedback import correct_answer
-from api_agent.goal_application import GoalApplication
-from api_agent.interaction import HumanInteraction
+from api_agent.goals.feedback import correct_answer
+from api_agent.goals.application import GoalApplication
+from api_agent.goals.interaction import HumanInteraction
 from api_agent.openapi import parse_document
 from api_agent.policy import ProjectConfig
 from api_agent.storage import SQLiteHistory

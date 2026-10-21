@@ -5,14 +5,14 @@ import json
 from pathlib import Path
 import sys
 
-from .agent.catalog import CatalogLimits
-from .agent.model import LocalModel
-from .agent.resilience import JsonlJournal
-from .goal_application import GoalApplication
+from ..agent.catalog import CatalogLimits
+from ..agent.model import LocalModel
+from ..agent.resilience import JsonlJournal
+from .application import GoalApplication
 from .interaction import HumanInteraction
-from .policy import ProjectConfig
-from .storage import SQLiteHistory
-from .validation import fingerprint
+from ..policy import ProjectConfig
+from ..storage import SQLiteHistory
+from ..validation import fingerprint
 
 
 def run_goal_cli(args, catalog, directory, sink, *, model, token_counter, cancel, reader=None):

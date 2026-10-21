@@ -252,7 +252,7 @@ def main(mode):
             .hexdigest()
             for p in [
                 *sorted((ROOT / "src/api_agent/openapi").glob("*.py")),
-                ROOT / "src/api_agent/socket_deadline.py",
+                ROOT / "src/api_agent/transport/socket_deadline.py",
                 ROOT / "scripts/check_openapi.py",
                 ROOT / "scripts/check_stage.py",
                 ROOT / "tests/openapi_support.py",

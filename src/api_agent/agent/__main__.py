@@ -86,7 +86,7 @@ def main(argv=None, *, model=None, token_counter=None, human_reader=None):
             )
 
         if args.generate_goal:
-            from ..goal_cli import run_goal_cli
+            from ..goals.cli import run_goal_cli
             return run_goal_cli(args, catalog, directory, sink, model=model, token_counter=token_counter,
                                 cancel=cancel, reader=human_reader)
 

@@ -19,14 +19,14 @@ class ProjectFactGateTests(unittest.TestCase):
 
     def test_bad_gate_rejects_bypassed_predicate_validator(self):
         gate = self.gate()
-        from api_agent.facts import validate_exchange
+        from api_agent.validation.facts import validate_exchange
         def accept_bad(*args, **kwargs):
             result = validate_exchange(*args, **kwargs)
             for check in result['checks']:
                 check['verdict'] = 'pass'
             return result
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'S09_EVIDENCE_DIR': folder}):
-            with patch('api_agent.facts.validate_exchange', side_effect=accept_bad):
+            with patch('api_agent.validation.facts.validate_exchange', side_effect=accept_bad):
                 self.assertEqual(gate.main('bad'), 1)
 
     def test_missing_test_is_preparation_error_not_expected_bad(self):

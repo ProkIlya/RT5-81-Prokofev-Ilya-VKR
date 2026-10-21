@@ -12,10 +12,10 @@ import keyword
 from pathlib import Path
 import re
 
-from .bounded_json import validate_tree
-from .openapi.parser import canonical, pointer_get, pointer_part
-from .policy import ProjectConfig
-from .validation import fingerprint
+from ..bounded_json import validate_tree
+from ..openapi.parser import canonical, pointer_get, pointer_part
+from ..policy import ProjectConfig
+from ..validation import fingerprint
 
 BUILDER_VERSION = 'workspace-sdk-v1'
 METADATA_VERSION = 'workspace-metadata-v1'
@@ -223,7 +223,7 @@ class _Api:
 def main(argv=None):
     """Подготовить SDK для версии Project/spec, без создания или исполнения Run."""
     import argparse
-    from .openapi import load_source
+    from ..openapi import load_source
     parser = argparse.ArgumentParser(description='Build a versioned SDK from an approved Project config')
     parser.add_argument('--spec', required=True)
     parser.add_argument('--project-config', required=True)

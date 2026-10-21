@@ -54,8 +54,8 @@ class GoalApplicationTests(unittest.TestCase):
                                          resettable=True, operations={'getPet': 'A'})
 
     def api(self):
-        self.assertIsNotNone(importlib.util.find_spec('api_agent.goal_application'), 'Нет application S09b')
-        from api_agent.goal_application import GoalApplication
+        self.assertIsNotNone(importlib.util.find_spec('api_agent.goals.application'), 'Нет application S09b')
+        from api_agent.goals.application import GoalApplication
         return GoalApplication
 
     def app(self, history, goal, *, proposal=None, human=None, limits=None):
@@ -89,7 +89,7 @@ class GoalApplicationTests(unittest.TestCase):
         self.assertEqual(len(self.server.journal), 1)
 
     def test_natural_goal_requires_confirmation_before_http_and_false_json_never_auto_accepts(self):
-        from api_agent.interaction import HumanInteraction
+        from api_agent.goals.interaction import HumanInteraction
         goal = 'Покажи имя питомца и проверь доступность сведений.'
         for value in ('no', 'yes'):
             with tempfile.TemporaryDirectory() as folder, SQLiteHistory(Path(folder) / 'h.sqlite3') as history:
@@ -134,7 +134,7 @@ class GoalApplicationTests(unittest.TestCase):
             self.assertEqual(len(self.server.journal), 1)
 
     def test_typed_input_is_asked_before_mutation_and_cannot_change_after_http(self):
-        from api_agent.interaction import HumanInteraction
+        from api_agent.goals.interaction import HumanInteraction
         from test_catalog_execution import catalog_variant
         self.catalog = catalog_variant('new')
         self.config = ProjectConfig.create('p', self.server.target, self.catalog, mode='TEST', resettable=True,
@@ -159,7 +159,7 @@ class GoalApplicationTests(unittest.TestCase):
         self.assertEqual(len(self.server.journal), 1)
 
     def test_missing_calculation_expectation_is_asked_without_generator_replay(self):
-        from api_agent.interaction import HumanInteraction
+        from api_agent.goals.interaction import HumanInteraction
         goal = 'Проверь правильность расчёта сервиса.'
         proposal = pet_proposal(self.catalog, self.config, goal)
         proposal['unresolved'] = ['Какой результат расчёта вы ожидаете?']
@@ -178,7 +178,7 @@ class GoalApplicationTests(unittest.TestCase):
         self.assertEqual(self.server.connections, 0)
 
     def test_generator_prefix_stable_across_goals_and_budget_preflight_stops_before_model(self):
-        from api_agent.goal_application import generator_payload
+        from api_agent.goals.application import generator_payload
         first = generator_payload(self.catalog, self.config, 'Покажи имя')
         second = generator_payload(self.catalog, self.config, 'Проверь доступность')
         self.assertEqual(first['messages'][0], second['messages'][0])
@@ -196,7 +196,7 @@ class GoalApplicationTests(unittest.TestCase):
         self.assertEqual(self.server.connections, 0)
 
     def test_bounded_metadata_discovery_precedes_single_generator_without_api_http(self):
-        from api_agent.goal_application import GoalApplication
+        from api_agent.goals.application import GoalApplication
         from api_agent.openapi import parse_document
         doc = json.loads((ROOT / 'tests/fixtures/demo_openapi.json').read_text())
         for index in range(18):
@@ -225,7 +225,7 @@ class GoalApplicationTests(unittest.TestCase):
             self.assertEqual(sum('propose_goal' in names for names in calls), 1)
 
     def test_secret_literal_in_metadata_never_reaches_generator(self):
-        from api_agent.goal_application import GoalApplication
+        from api_agent.goals.application import GoalApplication
         goal = 'Проверь getPet: статус 200.'
         secret = 'Murka'
         # Секрет в публичной декларации несовместим с закреплённой identity.
@@ -233,7 +233,7 @@ class GoalApplicationTests(unittest.TestCase):
         doc['paths']['/pets/1']['get']['responses']['200']['content']['application/json']['schema']['properties']['name']['enum'] = [secret]
         self.catalog = parse_document(doc)
         self.config = ProjectConfig.create('p', self.server.target, self.catalog, mode='READ_ONLY', resettable=True, operations={'getPet': 'A'})
-        from api_agent.interaction import HumanInteraction
+        from api_agent.goals.interaction import HumanInteraction
         human = HumanInteraction(lambda q: {'request_id': q['id'], 'value': secret})
         human.private_input('test_password')
         generator_calls = []
@@ -258,7 +258,7 @@ class GoalApplicationTests(unittest.TestCase):
             self.assertEqual([r for r in results if r is not None], [payload])
 
     def test_expected_input_must_be_fixed_before_http_and_cannot_be_replaced_after(self):
-        from api_agent.interaction import HumanInteraction
+        from api_agent.goals.interaction import HumanInteraction
         goal = 'Проверь, что имя равно значению, которое я укажу.'
         proposal = pet_proposal(self.catalog, self.config, goal)
         proposal['input_slots'] = [{'id': 'expected_name', 'type': 'string'}]
@@ -282,7 +282,7 @@ class GoalApplicationTests(unittest.TestCase):
             self.assertIn(run['stop_reason'], {'input_slot_locked', 'malformed_limit'})
 
     def test_compiled_create_read_keeps_s09a_fact_validators(self):
-        from api_agent.interaction import HumanInteraction
+        from api_agent.goals.interaction import HumanInteraction
         from test_catalog_execution import catalog_variant, GenericModel
         self.catalog = catalog_variant('fresh')
         self.config = ProjectConfig.create('p', self.server.target, self.catalog, mode='TEST', resettable=True,

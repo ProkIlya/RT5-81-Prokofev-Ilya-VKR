@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from api_agent.first_http import Session, load_catalog, run_goal
+from api_agent.transport.http import Session, load_catalog, run_goal
 from scripts.check_http_e2e import LocalModel
 
 CATALOG = load_catalog(ROOT / "tests/fixtures/demo_openapi.json")

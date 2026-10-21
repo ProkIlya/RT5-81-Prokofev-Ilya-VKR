@@ -58,8 +58,8 @@ CASES = {
 def live(directory):
     """Настоящие LLM+HTTP+SQLite; semantic acceptance здесь controlled fixture."""
     from api_agent.agent.model import LocalModel
-    from api_agent.goal_application import GoalApplication
-    from api_agent.interaction import HumanInteraction
+    from api_agent.goals.application import GoalApplication
+    from api_agent.goals.interaction import HumanInteraction
     from api_agent.openapi import load_source
     from api_agent.policy import ProjectConfig
     from api_agent.storage import SQLiteHistory

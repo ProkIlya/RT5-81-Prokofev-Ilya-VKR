@@ -33,8 +33,8 @@ def example(verdict='FAIL', *, draft='PASS'):
 
 class AnswerFeedbackTests(unittest.TestCase):
     def api(self):
-        self.assertIsNotNone(importlib.util.find_spec('api_agent.answer_feedback'), 'Нет S09c feedback/correction')
-        from api_agent import answer_feedback
+        self.assertIsNotNone(importlib.util.find_spec('api_agent.goals.feedback'), 'Нет S09c feedback/correction')
+        from api_agent.goals import feedback as answer_feedback
         return answer_feedback
 
     def execute(self, run=None, *, diagnostic=False, model=None, limits=None, cancel=None, clock=lambda: 1,

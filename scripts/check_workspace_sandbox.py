@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 import uuid
 
@@ -44,7 +45,7 @@ CASES = {
 
 
 def preflight():
-    from api_agent.workspace_sandbox import DOCKER, DOCKER_HOST
+    from api_agent.workspace.sandbox import DOCKER, DOCKER_HOST
     import re
     image = os.environ.get('WORKSPACE_IMAGE', '')
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', image): raise ValueError('pinned_image_required')
@@ -59,18 +60,20 @@ def preflight():
 def sample(directory):
     """Сохраняемый broker/adapter trace отдельно от временных unit fixtures."""
     from api_agent.storage.history import SQLiteHistory
-    from api_agent.workspace_sandbox import WorkspaceSandbox
+    from api_agent.workspace.sandbox import WorkspaceSandbox
     from demo_api.server import DemoServer
     import test_workspace_broker as fixtures
     with DemoServer() as server, SQLiteHistory(directory / 'controlled.sqlite3') as history:
         with fixtures.WorkspaceBrokerTests().setup_broker(server, history) as broker:
-            with WorkspaceSandbox(broker, image=os.environ['WORKSPACE_IMAGE'], root=directory / 'work') as worker:
-                state = worker.inspect()
-                first = worker.execute("a=api.createOrder(body={'name':'A'})\nb=api.createOrder(body={'name':'B'})", call_id='controlled-1')
-                second = worker.execute("r=api.readOrder(path__order_id=a['body']['id'])\nprint(r['body']['name'])\napi.finish('Observed', claims=[], answer_fields={})", call_id='controlled-2')
-                if first['error'] or second['error'] or second['output'].strip() != 'A' or not broker.finished:
-                    raise ValueError('controlled_sample_failed')
-            if worker.exists(): raise ValueError('sandbox_cleanup_failed')
+            # Временный runtime не зависит от глубины durable evidence (Windows MAX_PATH).
+            with tempfile.TemporaryDirectory(prefix='api-agent-gate-') as temporary:
+                with WorkspaceSandbox(broker, image=os.environ['WORKSPACE_IMAGE'], root=Path(temporary) / 'work') as worker:
+                    state = worker.inspect()
+                    first = worker.execute("a=api.createOrder(body={'name':'A'})\nb=api.createOrder(body={'name':'B'})", call_id='controlled-1')
+                    second = worker.execute("r=api.readOrder(path__order_id=a['body']['id'])\nprint(r['body']['name'])\napi.finish('Observed', claims=[], answer_fields={})", call_id='controlled-2')
+                    if first['error'] or second['error'] or second['output'].strip() != 'A' or not broker.finished:
+                        raise ValueError('controlled_sample_failed')
+                if worker.exists(): raise ValueError('sandbox_cleanup_failed')
         if len(server.journal) != 3: raise ValueError('controlled_sample_http_count')
         (directory / 'controlled-run.json').write_text(json.dumps(broker.safe_run(), ensure_ascii=False, indent=2), encoding='utf-8')
         (directory / 'target-journal.json').write_text(json.dumps({'connections': server.connections, 'http': server.journal}, indent=2), encoding='utf-8')

@@ -7,10 +7,10 @@ from copy import deepcopy
 import json
 import time
 
-from .bounded_json import validate_tree
-from .openapi.parser import pointer_get, canonical
-from .validation import fingerprint, schema_issues
-from .agent.resilience import BudgetViolation
+from ..bounded_json import validate_tree
+from ..openapi.parser import pointer_get, canonical
+from ..validation import fingerprint, schema_issues
+from ..agent.resilience import BudgetViolation
 
 CLAIM_SCHEMA = {'type': 'array', 'maxItems': 32, 'items': {'type': 'object',
     'properties': {'condition_id': {'type': 'string'}, 'verdict': {'type': 'string', 'enum': ['PASS', 'FAIL', 'UNKNOWN']}},

@@ -31,8 +31,8 @@ def document(domain='pet'):
 
 class WorkspaceSdkTests(unittest.TestCase):
     def api(self):
-        self.assertIsNotNone(importlib.util.find_spec('api_agent.workspace_sdk'), 'Нет SDK builder S09d1')
-        from api_agent import workspace_sdk
+        self.assertIsNotNone(importlib.util.find_spec('api_agent.workspace.sdk'), 'Нет SDK builder S09d1')
+        from api_agent.workspace import sdk as workspace_sdk
         return workspace_sdk
 
     def build(self, doc=None, *, operations=None):

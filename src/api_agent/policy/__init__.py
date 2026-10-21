@@ -11,7 +11,7 @@ import hmac
 import secrets
 import json
 from ..bounded_json import validate_tree
-from ..first_http import loopback_origin
+from ..transport.http import loopback_origin
 from ..openapi.parser import canonical
 from ..validation import fingerprint
 from ..agent.chains import ChainSession

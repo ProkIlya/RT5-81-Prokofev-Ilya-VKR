@@ -45,7 +45,7 @@ def live(directory):
     from api_agent.agent.model import LocalModel
     from api_agent.agent.catalog import CatalogLimits
     from api_agent.agent.resilience import TokenBudget
-    from api_agent.answer_feedback import correct_answer
+    from api_agent.goals.feedback import correct_answer
     source = collect(directory, 'pet', 'object')
     source.pop('answer_feedback')
     source['steps'][-1]['action']['arguments']['claims'][0]['verdict'] = 'PASS'

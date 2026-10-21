@@ -106,7 +106,7 @@ class AgentModelTests(unittest.TestCase):
 
     def test_foreign_llm_target_rejected(self):
         from api_agent.agent.model import LocalModel
-        from api_agent.first_http import PolicyDenied
+        from api_agent.transport.http import PolicyDenied
 
         with self.assertRaises(PolicyDenied):
             LocalModel("http://example.com:80")

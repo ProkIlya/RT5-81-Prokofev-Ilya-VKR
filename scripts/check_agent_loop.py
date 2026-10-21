@@ -216,7 +216,7 @@ def main(mode):
                 "observer_positive_control": True,
                 "source_hashes": {
                     str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-                    for p in sorted((ROOT / "src/api_agent/agent").glob("*.py"))
+                    for p in sorted((ROOT / "src").rglob("*.py"))
                 },
             }
             save(directory / (mode + ".json"), manifest)

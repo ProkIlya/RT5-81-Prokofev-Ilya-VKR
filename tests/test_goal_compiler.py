@@ -40,8 +40,8 @@ def fixture(domain='pet', *, wrapped=False):
 
 class GoalCompilerTests(unittest.TestCase):
     def api(self):
-        self.assertIsNotNone(importlib.util.find_spec('api_agent.goals'), 'Нет компилятора S09b1')
-        from api_agent import goals
+        self.assertIsNotNone(importlib.util.find_spec('api_agent.goals.compiler'), 'Нет компилятора S09b1')
+        from api_agent.goals import compiler as goals
         return goals
 
     def compile(self, case, *, confirm=False):

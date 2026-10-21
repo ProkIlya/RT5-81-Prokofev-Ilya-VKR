@@ -13,8 +13,8 @@ import threading
 import time
 import uuid
 
-from .workspace_broker import WorkspaceError
-from .openapi.parser import canonical
+from .broker import WorkspaceError
+from ..openapi.parser import canonical
 
 DOCKER = os.environ.get('WORKSPACE_DOCKER', r'C:\Program Files\Docker\Docker\resources\bin\docker.exe' if os.name == 'nt' else 'docker')
 DOCKER_HOST = os.environ.get('WORKSPACE_DOCKER_HOST', 'npipe:////./pipe/dockerDesktopLinuxEngine' if os.name == 'nt' else 'unix:///var/run/docker.sock')
@@ -76,7 +76,7 @@ class WorkspaceSandbox:
                 raise WorkspaceError('sandbox_image_required')
             self.directory.mkdir(parents=True)
             runtime = self.directory / 'runtime' / 'api_agent'
-            shutil.copytree(Path(__file__).parent, runtime, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+            shutil.copytree(Path(__file__).parent.parent, runtime, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
             artifact = self.broker.artifact.save(self.directory / 'sdk')
             # Пустой config исключает автоматический перенос host proxy credentials в ENV.
             command = [DOCKER, '--config', str(self.directory / 'docker-config'), '--host', DOCKER_HOST, 'run', '--rm', '--pull=never', '-i', '--name', self.name,
@@ -87,7 +87,7 @@ class WorkspaceSandbox:
                 '--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=' + str(self.limits.tmp_mb) + 'm,mode=1777',
                 '--mount=type=bind,source=' + str(runtime.parent) + ',target=/runtime,readonly',
                 '--mount=type=bind,source=' + str(artifact) + ',target=/artifact,readonly',
-                '--workdir=/tmp', '--entrypoint=/usr/local/bin/python', self.image, '-I', '-u', '/runtime/api_agent/workspace_worker.py']
+                '--workdir=/tmp', '--entrypoint=/usr/local/bin/python', self.image, '-I', '-u', '/runtime/api_agent/workspace/worker.py']
             self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             self.reader = threading.Thread(target=self._read, daemon=True); self.reader.start()
             self._send({'artifact_hash': self.broker.artifact.hash, 'memory_bytes': self.limits.memory_mb * 1024 * 1024,

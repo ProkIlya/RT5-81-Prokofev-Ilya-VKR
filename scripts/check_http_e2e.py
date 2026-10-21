@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from api_agent.first_http import PolicyDenied, Session, load_catalog, loopback_origin, run_goal
+from api_agent.transport.http import PolicyDenied, Session, load_catalog, loopback_origin, run_goal
 from api_agent.agent.model import LocalModel
 from demo_api.server import DemoServer
 
@@ -128,7 +128,7 @@ def main(mode):
     result["python"] = sys.version
     # HEAD ещё может быть базовым commit при проверке незакоммиченного кода.
     # Хеши исходников точно идентифицируют проверенную рабочую версию.
-    sources = ["src/api_agent/first_http.py", "src/api_agent/socket_deadline.py",
+    sources = ["src/api_agent/transport/http.py", "src/api_agent/transport/socket_deadline.py",
                "demo_api/server.py", "scripts/check_http_e2e.py",
                "experiments/local_model/spike.py", "tests/test_transport_deadlines.py",
                "scripts/check_stage.py", "tests/fixtures/demo_openapi.json",

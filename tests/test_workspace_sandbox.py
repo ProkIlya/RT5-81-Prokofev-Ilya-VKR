@@ -33,8 +33,8 @@ class WorkspaceSandboxTests(unittest.TestCase):
         from api_agent.openapi import load_source
         from api_agent.policy import ProjectConfig
         from api_agent.agent.catalog import CatalogWorkflow
-        from api_agent.workspace_broker import WorkspaceBroker
-        from api_agent.workspace_sdk import build_sdk
+        from api_agent.workspace.broker import WorkspaceBroker
+        from api_agent.workspace.sdk import build_sdk
         module = self.module()
         with tempfile.TemporaryDirectory() as directory, DemoServer() as server, SQLiteHistory(Path(directory) / 'h.db') as history:
             server.pet['name'] = 'x' * 48000
@@ -111,8 +111,8 @@ class WorkspaceSandboxTests(unittest.TestCase):
         self.run_case(exercise)
 
     def module(self):
-        self.assertIsNotNone(importlib.util.find_spec('api_agent.workspace_sandbox'), 'Нет networkless worker S09d2')
-        from api_agent import workspace_sandbox
+        self.assertIsNotNone(importlib.util.find_spec('api_agent.workspace.sandbox'), 'Нет networkless worker S09d2')
+        from api_agent.workspace import sandbox as workspace_sandbox
         return workspace_sandbox
 
     def run_case(self, exercise, *, seconds=8):
@@ -149,7 +149,7 @@ try:
 except OSError: print('network denied')
 print(os.path.exists('/var/run/docker.sock'), os.path.exists('/host'), os.path.exists('/runtime/.git'))
 print(sorted(os.environ))
-try: open('/runtime/api_agent/workspace_sdk.py','w')
+try: open('/runtime/api_agent/workspace/sdk.py','w')
 except OSError: print('readonly')
 """.replace('PORT', str(server.port) if hasattr(server, 'port') else server.target.rsplit(':', 1)[1])
             result = worker.execute(code)
@@ -220,6 +220,18 @@ except OSError: print('readonly')
             self.assertIn('pids limited', result['output'])
             self.assertEqual(server.journal, [])
         self.run_case(exercise)
+
+    def test_saved_gate_trace_survives_long_evidence_directory(self):
+        from scripts.check_workspace_sandbox import sample
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / ('evidence-' + 'x' * 110)
+            directory.mkdir()
+            record = sample(directory)
+            self.assertEqual(record['http'], 3)
+            self.assertTrue(record['cleanup_confirmed'])
+            saved = json.loads((directory / 'controlled-run.json').read_text(encoding='utf-8'))
+            self.assertEqual(saved['status'], 'completed')
+            self.assertEqual(len(saved['exchanges']), 3)
 
 
 if __name__ == '__main__': unittest.main()

@@ -3,15 +3,15 @@ from copy import deepcopy
 import json
 import threading
 
-from .agent import StartAgentRun
-from .agent.catalog import CatalogLimits
-from .agent.resilience import TokenBudget
-from .bounded_json import validate_tree
-from .goals import compile_goal
-from .goal_workflow import GoalWorkflow
+from ..agent import StartAgentRun
+from ..agent.catalog import CatalogLimits
+from ..agent.resilience import TokenBudget
+from ..bounded_json import validate_tree
+from .compiler import compile_goal
+from .workflow import GoalWorkflow
 from .interaction import HumanInteraction
-from .policy import decision
-from .validation import fingerprint
+from ..policy import decision
+from ..validation import fingerprint
 
 GENERATOR_SYSTEM = ('Propose checkable requirements for the user goal, never execute HTTP. '
     'Use only supplied operation IDs and schema paths. Do not invent an expected calculation result. '
@@ -66,7 +66,7 @@ def generator_payload(catalog, config, goal, *, metadata_ids=None, version=1):
     def paths(schema, prefix=''):
         result = [prefix]
         if isinstance(schema, dict):
-            from .openapi.parser import pointer_part
+            from ..openapi.parser import pointer_part
             for name, child in schema.get('properties', {}).items(): result += paths(child, prefix + '/' + pointer_part(name))
         return result
     metadata = []

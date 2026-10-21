@@ -19,14 +19,14 @@ class GoalGateTests(unittest.TestCase):
 
     def test_auto_accepting_arbitrary_json_breaks_negative_gate(self):
         gate = self.api()
-        from api_agent.goals import compile_goal
+        from api_agent.goals.compiler import compile_goal
         from api_agent.validation import fingerprint
         def blind(catalog, config, goal, proposal, **kwargs):
             kwargs['confirmation'] = {'proposal_hash': fingerprint(proposal), 'approved': True, 'complete': True}
             kwargs['force_confirmation'] = False
             return compile_goal(catalog, config, goal, proposal, **kwargs)
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'S09_EVIDENCE_DIR': folder}), \
-                patch('api_agent.goals.compile_goal', side_effect=blind):
+                patch('api_agent.goals.compiler.compile_goal', side_effect=blind):
             self.assertEqual(gate.main('S09b1', 'bad'), 1)
 
     def test_missing_test_module_does_not_count_as_bad_two(self):

@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import time
 from urllib.parse import urlsplit
-from ..socket_deadline import SocketDeadline
+from ..transport.socket_deadline import SocketDeadline
 from .parser import MAX_BYTES, OpenApiError, parse_document
 
 

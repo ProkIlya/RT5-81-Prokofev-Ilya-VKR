@@ -36,6 +36,10 @@ class AgentGateTests(unittest.TestCase):
                 destination = root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes((ROOT / relative).read_bytes())
+            for relative in ("src/api_agent/agent/execution/dispatch.py", "src/api_agent/validation/exchange.py"):
+                source = root / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(b"# nested runtime fixture\n")
             weights = root / "models/MiniCPM5-2B-Q4_K_M.gguf"
             weights.parent.mkdir(parents=True)
             weights.write_bytes(b"unit model fixture")
@@ -56,6 +60,10 @@ class AgentGateTests(unittest.TestCase):
                 check_agent_loop, "LocalModel", return_value=InspectFirstModel()
             ):
                 self.assertEqual(check_agent_loop.main("good"), 0)
+                manifest = json.loads((root / "evidence/good.json").read_text(encoding="utf-8"))
+                for relative in ("src/api_agent/agent/execution/dispatch.py", "src/api_agent/validation/exchange.py"):
+                    self.assertEqual(manifest['source_hashes'].get(str(Path(relative))),
+                                     hashlib.sha256(b"# nested runtime fixture\n").hexdigest())
 
     def test_bad_gate_detects_missing_budget_guard(self):
         from api_agent.agent.runtime import StartAgentRun

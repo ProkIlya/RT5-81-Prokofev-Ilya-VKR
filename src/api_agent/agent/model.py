@@ -8,8 +8,8 @@ import http.client
 import json
 import time
 from copy import deepcopy
-from ..first_http import loopback_origin
-from ..socket_deadline import SocketDeadline
+from ..transport.http import loopback_origin
+from ..transport.socket_deadline import SocketDeadline
 from .streaming import collect_stream
 from ..bounded_json import validate_tree, numeric_metadata
 

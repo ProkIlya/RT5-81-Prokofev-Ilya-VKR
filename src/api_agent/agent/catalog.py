@@ -61,8 +61,10 @@ class CatalogWorkflow:
         request_auth=None,
         occurrences=None,
         admission_rules=None,
+        parameter_namespaces=False,
     ):
         self.catalog, self.config = catalog, config
+        self.parameter_namespaces = parameter_namespaces
         self.workflow = self
         self.approval = approval
         self.current_config = current_config or (lambda: config)
@@ -204,14 +206,17 @@ class CatalogWorkflow:
         """Отклонять неподдержанную сериализацию явно, не угадывать её по names."""
         parameters = op["parameters"]
         names = [p["name"] for p in parameters]
-        if len(set(names)) != len(names):
+        if not self.parameter_namespaces and len(set(names)) != len(names):
             return "ambiguous_parameter_name"
         if any(
-            p["in"] not in {"path", "query"}
+            p["in"] not in ({"path", "query", "header"} if self.parameter_namespaces else {"path", "query"})
             or p["schema"]["type"] not in {"string", "integer", "number", "boolean"}
             for p in parameters
         ):
             return "unsupported_parameter_serialization"
+        if any(p['in'] == 'header' and (p['name'] in {'host', 'connection', 'content-length', 'transfer-encoding',
+                'cookie', 'te', 'trailer', 'upgrade', 'expect'} or p['name'].startswith('proxy-')) for p in parameters):
+            return 'unsafe_transport_header'
         if (
             "requestBody" in op
             and "application/json" not in op["requestBody"]["content"]
@@ -261,7 +266,8 @@ class CatalogWorkflow:
 
     def runtime_manifest(self):
         """Только публичные application descriptors, без тела credentials."""
-        return deepcopy({'request_auth': self.request_auth, 'occurrences': self.occurrences,
+        return deepcopy({**({'parameter_namespaces': True} if self.parameter_namespaces else {}),
+            'request_auth': self.request_auth, 'occurrences': self.occurrences,
             'admission_rules': self.admission_rules, 'binding_rules': self.binding_rules,
             'extraction': self.extraction, 'selection_scopes': self.selection_scopes,
             'conditions': self.conditions,
@@ -1048,7 +1054,8 @@ class CatalogSession(PolicySession):
             raise ValueError('unexpected_occurrence')
         supplied = deepcopy(args.get("parameters", {}))
         bindings = args.get("bindings", {})
-        descriptors = {p["name"]: p for p in op["parameters"]}
+        descriptors = {(p['in'] + '__' + p['name'] if self.workflow.parameter_namespaces else p['name']): p
+            for p in op['parameters']}
         if (
             not set(supplied) <= set(descriptors)
             or not set(bindings) <= set(descriptors)
@@ -1099,6 +1106,7 @@ class CatalogSession(PolicySession):
             self._bound_inputs[key] = supplied[key]
         path = op["path"]
         query = []
+        parameter_headers = {}
         for key, p in descriptors.items():
             if key not in supplied:
                 if p["required"]:
@@ -1125,9 +1133,11 @@ class CatalogSession(PolicySession):
                 # Запрет encoded traversal/разделителей даже после серверного decode.
                 if any(c in text for c in ("/", "\\", "%", "?", "#")):
                     raise ValueError("unsafe_path_parameter")
-                path = path.replace("{" + key + "}", quote(text, safe=""))
+                path = path.replace("{" + p['name'] + "}", quote(text, safe=""))
+            elif p['in'] == 'query':
+                query.append((p['name'], text))
             else:
-                query.append((key, text))
+                parameter_headers[p['name']] = text
         if query:
             path += "?" + urlencode(query)
         body = args.get("body")
@@ -1163,7 +1173,7 @@ class CatalogSession(PolicySession):
         )
         if encoded and len(encoded) > 16384:
             raise ValueError("request_body_limit")
-        self._headers = {}
+        self._headers = parameter_headers
         mode = self.workflow.request_mode(name, slot)
         self._request_principal = {'mode': mode, 'auth_epoch': self.state.auth_epoch,
                                    'actor': None}
@@ -1182,7 +1192,7 @@ class CatalogSession(PolicySession):
             ):
                 raise ValueError("auth_reference_denied")
             self._request_principal['actor'] = self.state.principal
-            self._headers = {
+            self._headers = {**parameter_headers,
                 "Authorization": "Bearer "
                 + self.state.resolve(ref, "string", secret=True)
             }
@@ -1193,6 +1203,8 @@ class CatalogSession(PolicySession):
         epoch = (self.state.auth_revocations if auth and name == auth['login_operation']
                  else self.state.auth_epoch if mode == 'authenticated' else self.state.auth_revocations)
         action = (name, path, encoded, mode, epoch)
+        if self.workflow.parameter_namespaces:
+            action += (tuple(sorted(parameter_headers.items())),)
         if action in self.actions:
             raise ValueError("duplicate_semantic_action")
         self._request_parameters = deepcopy(supplied)

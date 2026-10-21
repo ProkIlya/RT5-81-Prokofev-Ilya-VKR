@@ -355,18 +355,20 @@ class SQLiteHistory:
             self.db.execute('UPDATE fact_projects SET reset_epoch=reset_epoch+1 WHERE project_key=?', (_key(project),))
             return self._fact_policy(project)['reset_epoch']
 
-    def _propose_fact(self, project, session, run_id, descriptor):
+    def _propose_fact(self, project, session, run_id, descriptor, *, preview=False):
         from ..facts import verify_fact, fact_view
         from ..openapi.parser import Catalog, canonical
+        from ..validation import fingerprint
         run = self.read_run(project, session, run_id)
         row = self.db.execute('SELECT lifecycle FROM runs WHERE run_id=?', (run_id,)).fetchone()
-        if row['lifecycle'] != 'finalized':
+        if row['lifecycle'] != 'finalized' and not preview:
             raise ValueError('fact_unfinished_run')
         snapshot = self._fact_snapshot(project, session, run_id, run)
         stamp = self.db.execute('SELECT * FROM fact_runs WHERE run_id=?', (run_id,)).fetchone()
         policy = self._fact_policy(project)
         fact = verify_fact(run, snapshot, descriptor, dict(stamp) if stamp else None, policy)
-        from ..validation import fingerprint
+        if preview:
+            return {'status': 'pending_finalization', 'type': fact['type'], 'proposal_hash': fingerprint(descriptor)}
         self.db.execute('INSERT OR IGNORE INTO project_facts VALUES(?,?,?,?,?)',
                         (fact['id'], _key(project), run_id, _json(fact), fingerprint(fact)))
         stored = self.db.execute('SELECT * FROM project_facts WHERE fact_id=? AND project_key=?',
@@ -402,6 +404,11 @@ class SQLiteHistory:
         with self.transaction():
             return self._propose_fact(project, session, run_id, descriptor)
 
+    def preview_fact(self, project, session, run_id, descriptor):
+        """Проверить proposal на собственной истории; до finalize факт не публикуется."""
+        with self.transaction():
+            return self._propose_fact(project, session, run_id, descriptor, preview=True)
+
     def invalidate_fact(self, project, fact_id, session, run_id, exchange_id):
         """Сохранить опровержение без удаления исходного значения и evidence."""
         from ..facts import contradict_fact
@@ -423,11 +430,12 @@ class SQLiteHistory:
 
     def _collect_facts(self, project, session, run_id):
         from ..facts import automatic_proposals
+        from itertools import chain
         run = self.read_run(project, session, run_id)
         if not run.get('contract'):
             return
         snapshot = self._fact_snapshot(project, session, run_id, run)
-        for descriptor in automatic_proposals(run, snapshot):
+        for descriptor in chain(automatic_proposals(run, snapshot), run.get('fact_proposals', [])[:16]):
             try:
                 self._propose_fact(project, session, run_id, descriptor)
             except ValueError:

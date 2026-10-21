@@ -219,12 +219,14 @@ class PolicySession(ChainSession):
             "operation_hash": self.catalog.operation_hashes[op_id],
             "method": op["method"],
             "path": path,
-            "arguments_hash": fingerprint(args),
+            "arguments_hash": hmac.new(self._action_key, canonical(args), hashlib.sha256).hexdigest(),
             "body_hash": hmac.new(
                 self._action_key, body or b"", hashlib.sha256
             ).hexdigest(),
         }
         preview = {"method": op["method"], "path": path}
+        if getattr(self.workflow, 'parameter_namespaces', False):
+            preview['parameters'] = deepcopy(self._request_parameters)
         if hasattr(self, '_request_principal'):
             proposal['request_principal'] = deepcopy(self._request_principal)
         if body is not None:

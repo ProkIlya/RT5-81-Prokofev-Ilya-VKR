@@ -1,1 +1,0 @@
-{"sessions":["authentication","orders"],"goal":"Check pet","goals":["Check pet","Check getPet"],"expected_status":"completed","expected_requests":2}

@@ -40,3 +40,6 @@ __pycache__/
 .ruff_cache/
 .vscode/
 .idea/
+
+# Tests are retained locally as a separately archived verification bundle.
+/tests/

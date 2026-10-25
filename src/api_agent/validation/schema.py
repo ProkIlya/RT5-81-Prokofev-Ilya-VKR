@@ -14,7 +14,7 @@ def schema_issues(value, schema, path="", schema_path=""):
     typ = schema["type"]
     types = typ if isinstance(typ, list) else [typ]
     nullable = "null" in types or schema.get("nullable", False)
-    base = next(t for t in types if t != "null")
+    base = next((t for t in types if t != "null"), "null")
     if value is None and nullable:
         if "enum" in schema and None not in schema["enum"]:
             return [
@@ -28,6 +28,7 @@ def schema_issues(value, schema, path="", schema_path=""):
             ]
         return []
     matches = {
+        "null": False,
         "object": isinstance(value, dict),
         "array": isinstance(value, list),
         "string": isinstance(value, str),
@@ -50,6 +51,13 @@ def schema_issues(value, schema, path="", schema_path=""):
     if not matches[base]:
         return [issue("schema_type", typ, value)]
     result = []
+    # oneOf относится к внутренним tool schemas; внешний OpenAPI profile
+    # по-прежнему не разрешает композиции. Не принимать смешение ветвей.
+    if "oneOf" in schema:
+        count = sum(not schema_issues(value, branch, path, schema_path + "/oneOf/" + str(index))
+                    for index, branch in enumerate(schema["oneOf"]))
+        if count != 1:
+            result.append(issue("oneOf", 1, count))
     # Внутренние схемы tools могут задавать пределы. Parser OpenAPI
     # по-прежнему отклоняет эти расширения: профиль внешнего контракта не меняется.
     if base == "string":

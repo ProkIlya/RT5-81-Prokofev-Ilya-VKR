@@ -102,6 +102,12 @@ def correct_answer(run, model, budget, *, deadline, clock, cancel, diagnostic=Fa
     started = clock()
     feedback = safe(build_feedback(run))
     drafts = [s['action']['arguments'] for s in run.get('steps', []) if (s.get('action') or {}).get('name') == 'finish_run']
+    # Broker final содержит исходный draft и явно применённые host defaults.
+    # Raw native arguments остаются в audit, но отсутствие optional полей
+    # не должно порождать ложный сигнал после их законного заполнения.
+    if run.get('final') and (run.get('model', {}).get('interface') == 'execute_code'
+        or any(e['kind'] == 'goal_completed_from_evidence' for e in run.get('events', []))):
+        drafts = [run['final']]
     draft = safe(deepcopy(drafts[-1])) if drafts else {}
     candidate = {key: draft[key] for key in ('claims', 'answer_fields') if key in draft}
     signals = check_claims(candidate, feedback)
@@ -116,6 +122,11 @@ def correct_answer(run, model, budget, *, deadline, clock, cancel, diagnostic=Fa
         result['revision']['status'] = 'no_completed_draft'
         return deepcopy(result)
     data = safe({'goal': run['goal'], 'draft': draft, 'code_feedback': feedback, 'signals': signals})
+    if run['admission_manifest']['goal_contract'].get('model_conditions') == 'hidden':
+        # Auxiliary тоже не получает скрытые определения; host feedback не меняется.
+        data['code_feedback']['conditions'] = [{k: c[k] for k in
+            ('condition_id', 'verdict', 'actual', 'actual_present', 'evidence_ids')}
+            for c in data['code_feedback']['conditions']]
 
     def call(role, data):
         state = result[role]

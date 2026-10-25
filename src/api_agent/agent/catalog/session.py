@@ -62,7 +62,8 @@ class CatalogSession(PolicySession):
             raise ValueError("invalid_parameters")
         self._bound_inputs = {}
         self._request_parameters = {}
-        for key, rule in self.workflow.binding_rules.get(name, {}).items():
+        rules = self.workflow.bindings_for(name, args.get('occurrence_id'))
+        for key, rule in rules.items():
             if key in supplied or key not in bindings:
                 refs = [
                     v["ref"]
@@ -86,7 +87,7 @@ class CatalogSession(PolicySession):
                 )
                 raise CatalogArgumentsError("explicit_binding_required", hint)
         for key, ref in bindings.items():
-            rule = self.workflow.binding_rules.get(name, {}).get(key)
+            rule = rules.get(key)
             record = next((v for v in self.state.public() if v["ref"] == ref), None)
             if (
                 rule is None

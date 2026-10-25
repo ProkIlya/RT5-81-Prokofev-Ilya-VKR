@@ -84,7 +84,8 @@ def prepare_expectations(
             if set(params) != {"path", "rows", "mode"} or not isinstance(params["mode"], str) or params["mode"] not in {"contains", "exact", "absent"} or not isinstance(params["path"], str) or len(params["path"]) > 500 or (params["path"] and not params["path"].startswith("/")):
                 raise ValueError("invalid_collection_condition")
             rows = params["rows"]
-            if not isinstance(rows, list) or not 1 <= len(rows) <= 16:
+            minimum_rows = 0 if params["mode"] == "exact" else 1
+            if not isinstance(rows, list) or not minimum_rows <= len(rows) <= 16:
                 raise ValueError("collection_condition_limit")
             for row in rows:
                 if not isinstance(row, dict) or not 1 <= len(row) <= 16 or any(not isinstance(path, str) or not path.startswith("/") or len(path) > 500 or isinstance(value, (dict, list)) for path, value in row.items()):

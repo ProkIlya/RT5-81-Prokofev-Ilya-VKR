@@ -37,8 +37,9 @@ def run_goal_cli(args, catalog, directory, sink, *, model, token_counter, cancel
             file = Path(args.runtime_mappings)
             if file.stat().st_size > 65536: raise ValueError('mapping_limit')
             mappings = json.loads(file.read_text(encoding='utf-8-sig'))
-        if not isinstance(mappings, dict) or set(mappings) - {'auth', 'extraction', 'binding_rules', 'private_bodies'}:
+        if not isinstance(mappings, dict) or set(mappings) - {'auth', 'extraction', 'binding_rules', 'private_bodies', 'model_test_passwords'}:
             raise ValueError('unsupported_goal_mappings')
+        model_test_passwords = mappings.pop('model_test_passwords', None)
         def console(request):
             print(json.dumps(request, ensure_ascii=False), file=sys.stderr)
             if request['kind'] == 'private_input': value = getpass.getpass('Приватное значение: ')
@@ -67,9 +68,18 @@ def run_goal_cli(args, catalog, directory, sink, *, model, token_counter, cancel
                 ('max_tokens_total', 'max_tokens_total')) if getattr(args, argument) is not None}
             limits = replace(limits, **values)
             local = model or LocalModel(args.llm_target)
+            workspace = None
+            if args.interface == 'code':
+                if not all((args.code_sdk, args.code_sdk_hash, args.code_image)):
+                    raise ValueError('code_sdk_and_image_required')
+                from ..workspace.sdk import SdkArtifact
+                from ..workspace.runtime import WorkspaceOptions
+                workspace = WorkspaceOptions(SdkArtifact.load(args.code_sdk, expected_hash=args.code_sdk_hash),
+                    args.code_image, model_name=args.model_name)
             app = GoalApplication(args.target, catalog, config, history=history, generator=local, human=human,
                 token_counter=token_counter, limits=limits, mappings=mappings, trace_sink=sink, event_sink=JsonlJournal(directory),
-                answer_diagnostic=args.answer_diagnostic)
+                answer_diagnostic=args.answer_diagnostic, workspace=workspace, model_name=args.model_name,
+                model_test_passwords=model_test_passwords)
             result = app.start(project, session, message, args.goal, local, parent_run_id=args.parent_run_id,
                                force_confirmation=args.confirm_goal)
             print(json.dumps(result, ensure_ascii=False))

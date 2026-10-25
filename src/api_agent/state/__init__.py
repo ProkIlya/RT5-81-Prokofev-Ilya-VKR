@@ -38,7 +38,7 @@ class RunState:
         self.auth_revocations += 1
         self.principal = None
 
-    def remember(self, exchange, path):
+    def remember(self, exchange, path, *, authenticate_as=None):
         """Извлечь только заранее разрешённый путь из ответа собственного Run."""
         if exchange["run_id"] != self.run_id:
             raise ValueError("foreign_run")
@@ -60,10 +60,16 @@ class RunState:
                 raise ValueError("invalid_secret_value")
         if len(self._records) >= 32:
             raise ValueError("state_limit")
+        if authenticate_as is not None:
+            status = exchange['response'].get('status')
+            if (not rule.get('secret') or not isinstance(authenticate_as, str) or not authenticate_as
+                or type(status) is not int or not 200 <= status < 300
+                or exchange.get('outcome') != 'received' or exchange.get('truncated')):
+                raise ValueError('authentication_response_denied')
         ref = "value-" + uuid.uuid4().hex[:16]
         while ref in self._records:
             ref = "value-" + uuid.uuid4().hex[:16]
-        self._records[ref] = {
+        record = {
             "ref": ref,
             "operation_id": exchange["operation_id"],
             "exchange_id": exchange["id"],
@@ -72,9 +78,12 @@ class RunState:
             "secret": bool(rule.get("secret")),
             "value": deepcopy(value),
             **({'occurrence_id': exchange['occurrence_id']} if 'occurrence_id' in exchange else {}),
-            **({'auth_epoch': self.auth_epoch, 'principal': self.principal}
-               if rule.get('secret') else {}),
         }
+        if authenticate_as is not None:
+            self.begin_auth(authenticate_as)
+        if rule.get('secret'):
+            record.update(auth_epoch=self.auth_epoch, principal=self.principal)
+        self._records[ref] = record
         return self._public_record(self._records[ref])
 
     def resolve(self, reference, kind, *, secret=False):

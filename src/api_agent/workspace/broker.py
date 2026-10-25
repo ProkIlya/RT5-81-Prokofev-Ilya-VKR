@@ -25,7 +25,7 @@ ERROR_CODES = set(('artifact_denied protocol_denied operation_denied invalid_par
     'fact_private_request fact_unknown_expectation fact_untrusted_condition fact_predicate_not_verified fact_runtime_value '
     'fact_unsupported_value fact_unsupported_predicate fact_identity_mismatch fact_invalid_create_read '
     'fact_invalid_request_parameter fact_untrusted_binding fact_content_unavailable fact_content_mismatch '
-    'fact_private_value fact_proposal_limit').split())
+    'fact_private_value fact_proposal_limit unexpected_http_status storage_error trace_error').split())
 
 
 class WorkspaceError(ValueError):
@@ -34,7 +34,8 @@ class WorkspaceError(ValueError):
 
 class WorkspaceBroker:
     """Один последовательный Run под SQLite lease, с повторной policy перед HTTP."""
-    def __init__(self, workflow, history, *, artifact, session_id, message_id, limits=None, cancel=None):
+    def __init__(self, workflow, history, *, artifact, session_id, message_id, limits=None, cancel=None,
+                 parent_run_id=None, model_metadata=None, trace_sink=None, event_sink=None, environment='local'):
         self.workflow, self.history = workflow, history
         self.catalog, self.config = workflow.catalog, workflow.config
         self.limits, self.cancel = limits or CatalogLimits(), cancel or threading.Event()
@@ -46,6 +47,9 @@ class WorkspaceBroker:
             raise WorkspaceError('artifact_denied')
         self.artifact = artifact
         self.session_id, self.message_id = session_id, message_id
+        self.parent_run_id, self.model_metadata = parent_run_id, deepcopy(model_metadata)
+        self.trace_sink, self.event_sink = trace_sink, event_sink
+        self.environment, self.registered = environment, False
         self.run = None
         self.context = {}
         self.stopped = None
@@ -93,6 +97,8 @@ class WorkspaceBroker:
                 'status': 'partial', 'stop_reason': None, 'steps': [], 'exchanges': [], 'validations': [], 'validation': None,
                 'events': [], 'requests': 0, 'model_calls': 0, 'expectations': [e for group in self.prepared.values() for e in group],
                 'code_executions': [], 'sdk_hash': self.artifact.hash, 'resources': {}, 'final': None}
+            if self.parent_run_id: self.run['parent_run_id'] = self.parent_run_id
+            if self.model_metadata is not None: self.run['model'] = deepcopy(self.model_metadata)
             self.session = self.workflow.make_session(snap['target'], self.catalog, self.run, self.limits)
             self.session.cancel = self.cancel
             metadata = self.workflow.storage_metadata() if hasattr(self.workflow, 'storage_metadata') else self.workflow.runtime_manifest()
@@ -101,24 +107,51 @@ class WorkspaceBroker:
                 or self.safe(self.artifact.source, metadata=True) != self.artifact.source):
                 raise WorkspaceError('contract_redaction_conflict')
             self.history.begin_run(snap['project_id'], self.session_id, self.message_id, self.run,
-                environment='local', configuration=snap, metadata=metadata)
+                environment=self.environment, configuration=snap, metadata=metadata)
+            self.registered = True
             self.event('workspace_started', {'sdk_hash': self.artifact.hash})
             return self
         except BaseException:
-            self._lease.__exit__(None, None, None)
-            self._lease = None
+            try:
+                if self.registered:
+                    self.stopped = self.stopped or 'workspace_initialization_error'
+                    self.run.update(status='partial', stop_reason=self.stopped)
+                    self.run['report'] = self.safe(report(self.run))
+                    self.run = self.safe_run()
+                    self.history.finalize(self.run['project_id'], self.session_id, self.message_id, self.run)
+            finally:
+                self._clear()
+                self._lease.__exit__(None, None, None)
+                self._lease = None
             raise
 
     def checkpoint(self):
         self.run['requests'] = self.session.requests
-        self.history.save_snapshot(self.safe_run())
+        snapshot = self.safe_run()
+        self.history.save_snapshot(snapshot)
+        if self.trace_sink:
+            try: self.trace_sink(deepcopy(snapshot))
+            except Exception:
+                self.stopped = self.stopped or 'trace_error'
+                raise WorkspaceError('trace_error') from None
 
     def event(self, kind, details=None):
         event = {'run_id': self.run['run_id'], 'sequence': len(self.run['events']) + 1,
             'kind': kind, 'details': self.safe({**self.context, **(details or {})})}
         self.run['events'].append(event)
-        self.history.append_event(event)
-        self.checkpoint()
+        # Одна durable транзакция вместо двух commit; trace failure откатывает обе записи.
+        try:
+            with self.history.transaction():
+                self.history.append_event(event)
+                self.checkpoint()
+        except Exception:
+            self.stopped = self.stopped or 'storage_error'
+            raise WorkspaceError(self.stopped) from None
+        if self.event_sink:
+            try: self.event_sink(deepcopy(event))
+            except Exception:
+                self.stopped = self.stopped or 'trace_error'
+                raise WorkspaceError('trace_error') from None
 
     def stop(self, reason):
         self.stopped = self.stopped or reason
@@ -198,7 +231,7 @@ class WorkspaceBroker:
         if self.workflow.occurrences:
             if slot is None or slot['operation_id'] != name: raise WorkspaceError('occurrence_denied')
             args['occurrence_id'] = slot['id']
-        for key, rule in self.workflow.binding_rules.get(name, {}).items():
+        for key, rule in self.workflow.bindings_for(name, args.get('occurrence_id')).items():
             refs = [r for r in self.session.state.public() if not r['secret'] and r['operation_id'] == rule['source_operation']
                 and r['path'] == rule['source_path'] and ('source_occurrence' not in rule or r.get('occurrence_id') == rule['source_occurrence'])
                 and key in supplied and canonical(r['value']) == canonical(supplied[key])]
@@ -241,6 +274,13 @@ class WorkspaceBroker:
         self.event('http_completed', {'operation_id': name, 'exchange_id': exchange['id'],
             'request_index': self.session.requests, 'outcome': exchange['outcome'], 'validation_hash': fingerprint(self.safe(validation))})
         response = exchange.get('response') or {}
+        accepted = getattr(self.workflow, 'accepted', None)
+        if accepted is not None and accepted.snapshot.get('contract') == 'conditions-v2':
+            expected = {status for condition in self.prepared[self.workflow.prepared_key(args)]
+                if condition['predicate'] == 'status_in' for status in condition['parameters']['values']}
+            # Evidence уже сохранено. Новый блок выбирает модель, HTTP не повторяется.
+            if response.get('status') not in expected:
+                raise WorkspaceError('unexpected_http_status')
         return self.safe({'status': response.get('status'), 'body': deepcopy(response.get('json')),
             'json_valid': response.get('json_valid', False), 'truncated': exchange['truncated'], 'outcome': exchange['outcome']})
 
@@ -264,15 +304,26 @@ class WorkspaceBroker:
             if self.session.uncertain or self.run.get('pending_mutation'):
                 self.run.update(uncertain_write=True, primary_safety_cause='uncertain_write', stop_reason='uncertain_write', status='partial')
             self.run['report'] = self.safe(report(self.run))
+            try:
+                self.checkpoint()
+            except WorkspaceError:
+                # Ошибка финального экспорта тоже сохраняется; HTTP не повторяется.
+                self.run.update(status='partial', stop_reason=self.stopped or 'trace_error')
+                self.run['report'] = self.safe(report(self.run))
             self.run = self.safe_run()
             self.session.run = self.run
             self.history.finalize(self.run['project_id'], self.session_id, self.message_id, self.run)
         finally:
+            self._clear()
+            if self._lease: self._lease.__exit__(exc_type, exc, tb)
+
+    def _clear(self):
+        """Ошибка enter также освобождает приватное состояние и временные ключи."""
+        if hasattr(self, 'session'):
             self.session.state.close()
             self.session.actions.clear()
             self.session._headers.clear()
             self.session._action_key = b''
             self.session._approved.clear()
             self.session.exchanges.clear()
-            self.audit_key = b''
-            if self._lease: self._lease.__exit__(exc_type, exc, tb)
+        self.audit_key = b''

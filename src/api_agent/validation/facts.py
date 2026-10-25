@@ -17,6 +17,12 @@ TYPES = {'declared_contract', 'response_observation', 'create_read_link'}
 SOURCES = {'DECLARED', 'OBSERVED', 'INFERRED', 'USER_PROVIDED'}
 
 
+def _bindings(snapshot, exchange):
+    metadata = snapshot['metadata']
+    return metadata.get('occurrence_bindings', {}).get(exchange.get('occurrence_id'),
+        metadata.get('binding_rules', {}).get(exchange['operation_id'], {}))
+
+
 def checked_time(value):
     """NaN/бесконечность и bool не могут отключить сроки свежести."""
     if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
@@ -158,7 +164,7 @@ def verify_fact(run, snapshot, descriptor, stamp, policy):
             route = read_op['path'].replace('{' + parameter + '}', quote(str(identifier), safe=''))
             if '{' in route or urlsplit(read['request']['url']).path != route:
                 raise ValueError('fact_identity_mismatch')
-            binding = snapshot['metadata'].get('binding_rules', {}).get(operation, {}).get(parameter)
+            binding = _bindings(snapshot, read).get(parameter)
             extraction = snapshot['metadata'].get('extraction', {}).get(created['operation_id'], {}).get(verify['create_id_path'])
             expected_binding = {'source_operation': created['operation_id'], 'source_path': verify['create_id_path']}
             if binding and 'source_occurrence' in binding:
@@ -235,7 +241,7 @@ def automatic_proposals(run, snapshot):
             if expectation['operation_id'] == exchange['operation_id']:
                 yield {'type': 'response_observation', 'source': 'OBSERVED', 'operation_id': exchange['operation_id'],
                        'verify': {'exchange_id': exchange['id'], 'expectation_id': expectation['id']}}
-        bindings = snapshot['metadata'].get('binding_rules', {}).get(exchange['operation_id'], {})
+        bindings = _bindings(snapshot, exchange)
         for parameter, binding in bindings.items():
             for created in run['exchanges']:
                 if created['operation_id'] == binding['source_operation']:

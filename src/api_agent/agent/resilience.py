@@ -28,6 +28,12 @@ ERROR_CODES = {
     "needs_confirmation",
 }
 
+GENERATION_REPAIR_HINT = (
+    'The previous model reply exceeded its output limit and was rejected. No action from that reply ran. '
+    'Return concise executable code or tool arguments, omit comments and progress prints. '
+    'You may split remaining work across calls. Keep completed requests; do not repeat them.'
+)
+
 
 class BudgetViolation(ValueError):
     """Безопасная причина отказа preflight/accounting без исходного prompt."""

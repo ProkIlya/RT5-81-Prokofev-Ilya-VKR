@@ -170,6 +170,10 @@ def report(run):
         goal_checklist = check_goal(accepted, Catalog(canonical(run['contract'])), run)
         goal_verdict = ('FAIL' if checks_verdict == 'FAIL' or goal_checklist['verdict'] == 'FAIL' else
                         'PASS' if run['status'] == 'completed' and goal_checklist['verdict'] == 'PASS' else 'UNKNOWN')
+        from ..goals.completion import final_state_policy
+        if final_state_policy(run):
+            goal_verdict = ('FAIL' if goal_checklist['verdict'] == 'FAIL' else
+                'PASS' if run['status'] == 'completed' and goal_checklist['verdict'] == 'PASS' else 'UNKNOWN')
         if reason == 'finished':
             summary = {'PASS': 'Цель подтверждена.', 'FAIL': 'Обнаружено несоответствие принятым условиям.',
                        'UNKNOWN': 'Цель не подтверждена полностью.'}[goal_verdict]

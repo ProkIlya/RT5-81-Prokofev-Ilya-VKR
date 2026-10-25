@@ -57,13 +57,17 @@ class SQLiteHistory(FactHistory):
     def transaction(self):
         """Связи фиксируются вместе; отказ до commit не оставляет Message без Run."""
         with self._lock:
+            nested = self.db.in_transaction
             try:
-                self.db.execute("BEGIN IMMEDIATE")
+                self.db.execute('SAVEPOINT history_nested' if nested else 'BEGIN IMMEDIATE')
                 yield
-                self.db.execute("COMMIT")
+                self.db.execute('RELEASE SAVEPOINT history_nested' if nested else 'COMMIT')
             except Exception as error:
                 if self.db.in_transaction:
-                    self.db.execute("ROLLBACK")
+                    if nested:
+                        self.db.execute('ROLLBACK TO SAVEPOINT history_nested')
+                        self.db.execute('RELEASE SAVEPOINT history_nested')
+                    else: self.db.execute('ROLLBACK')
                 if isinstance(error, sqlite3.Error):
                     raise StorageError("storage_write_failed") from None
                 raise

@@ -14,6 +14,8 @@ import time
 import uuid
 
 from .broker import WorkspaceError
+from .preflight import check_code
+from .diagnostics import public_keys, valid_detail
 from ..openapi.parser import canonical
 
 DOCKER = os.environ.get('WORKSPACE_DOCKER', r'C:\Program Files\Docker\Docker\resources\bin\docker.exe' if os.name == 'nt' else 'docker')
@@ -91,7 +93,8 @@ class WorkspaceSandbox:
             self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             self.reader = threading.Thread(target=self._read, daemon=True); self.reader.start()
             self._send({'artifact_hash': self.broker.artifact.hash, 'memory_bytes': self.limits.memory_mb * 1024 * 1024,
-                'cpu_seconds': int(self.broker.limits.max_seconds) + 1})
+                'cpu_seconds': int(self.broker.limits.max_seconds) + 1,
+                'provided_bodies': [self.broker.workflow.auth['login_operation']] if self.broker.workflow.auth else []})
             ready = self._next(time.monotonic() + 30)
             if ready != {'kind': 'ready', 'artifact_hash': self.broker.artifact.hash}: raise WorkspaceError('worker_start_failed')
             state = self.inspect()
@@ -151,8 +154,17 @@ class WorkspaceSandbox:
         started = time.monotonic()
         deadline = min(started + self.limits.seconds, self.broker.session.deadline)
         before = self.broker.session.requests
-        sequence, output, error, variables, truncated = 0, '', None, [], False
+        sequence, output, error, error_line, error_object_type, variables, truncated = 0, '', None, None, None, [], False
+        error_detail, diagnostic_keys = None, public_keys(self.broker.artifact)
+        variable_types = {}
+        http_halted = False
         try:
+            supplied = (self.broker.workflow.auth or {}).get('login_operation')
+            diagnostic = check_code(code, self.broker.artifact, provided_bodies={supplied} if supplied else set())
+            if diagnostic:
+                error = diagnostic['error']
+                record['preflight'] = self.broker.safe(diagnostic)
+                return {'execution_id': execution, 'error': error, 'preflight': record['preflight']}
             self._send({'execution_id': execution, 'code': code})
             while True:
                 frame = self._next(deadline)
@@ -163,22 +175,39 @@ class WorkspaceSandbox:
                     sequence += 1
                     human = getattr(self.broker.workflow, 'human', None)
                     waited = human.waited_seconds if human else 0
-                    try: response = {'result': self.broker.dispatch(frame['request']), 'error': None}
-                    except WorkspaceError as caught: response = {'error': str(caught)}
+                    try:
+                        if http_halted and isinstance(frame['request'], dict) and frame['request'].get('kind') == 'operation':
+                            self.broker.event('call_rejected', {'reason': 'unexpected_http_status'})
+                            raise WorkspaceError('unexpected_http_status')
+                        response = {'result': self.broker.dispatch(frame['request']), 'error': None}
+                    except WorkspaceError as caught:
+                        response = {'error': str(caught)}
+                        http_halted |= str(caught) == 'unexpected_http_status'
                     if human: deadline += human.waited_seconds - waited
                     self._send(response)
                 elif frame.get('kind') == 'done':
-                    if (set(frame) != {'kind', 'execution_id', 'output', 'output_truncated', 'error', 'variables'}
+                    if (set(frame) != {'kind', 'execution_id', 'output', 'output_truncated', 'error', 'error_line', 'error_object_type', 'error_detail', 'variables', 'variable_types'}
                         or type(frame['output']) is not str or len(frame['output'].encode()) > 8192
                         or type(frame['output_truncated']) is not bool or type(frame['variables']) is not list
                         or (frame['error'] is not None and (type(frame['error']) is not str or len(frame['error']) > 80))
-                        or len(frame['variables']) > 32 or any(type(v) is not str or len(v) > 80 for v in frame['variables'])):
+                        or (frame['error_line'] is not None and (type(frame['error_line']) is not int
+                            or not 1 <= frame['error_line'] <= len(code.splitlines())))
+                        or frame['error_object_type'] not in (None, 'dict', 'list', 'str', 'int', 'float', 'bool')
+                        or not valid_detail(frame['error_detail'], diagnostic_keys)
+                        or len(frame['variables']) > 32 or any(type(v) is not str or len(v) > 80 for v in frame['variables'])
+                        or type(frame['variable_types']) is not dict or set(frame['variable_types']) != set(frame['variables'])
+                        or any(type(v) is not str or v not in {'dict', 'list', 'str', 'int', 'float', 'bool',
+                            'tuple', 'set', 'NoneType', 'other'} for v in frame['variable_types'].values())):
                         raise WorkspaceError('ProtocolDenied')
                     private = private or bool(self.broker.workflow.secrets())
                     if private: record['code'] = {'omitted': 'private_run'}
                     output = '[output omitted: private run]' if private else self.broker.safe(frame['output'])
                     error = frame['error'] if frame['error'] in ERRORS or frame['error'] is None else 'PythonError'
+                    error_line = frame['error_line']
+                    error_object_type = frame['error_object_type']
+                    error_detail = self.broker.safe(frame['error_detail'])
                     variables = [] if private else self.broker.safe(frame['variables'])
+                    variable_types = {} if private else self.broker.safe(frame['variable_types'])
                     truncated = frame['output_truncated']
                     break
                 else: raise WorkspaceError('ProtocolDenied')
@@ -189,12 +218,15 @@ class WorkspaceSandbox:
         finally:
             progress = self.broker.session.requests > before or self.broker.finished
             self.no_progress = 0 if progress else self.no_progress + 1
-            record.update(state='returned' if not self.closed else 'interrupted', error=error,
-                output=output, output_untrusted=True, output_bytes=len(output.encode()), output_truncated=truncated, variables=variables,
+            record.update(state='returned' if not self.closed else 'interrupted', error=error, error_line=error_line, error_object_type=error_object_type, error_detail=error_detail,
+                output=output, output_untrusted=True, output_bytes=len(output.encode()), output_truncated=truncated,
+                variables=variables, variable_types=variable_types,
                 wall_seconds=time.monotonic() - started, requests=self.broker.session.requests - before)
             self.broker.event('code_returned', {'error': error, 'progress': progress})
             self.broker.context = {}
-        return {'execution_id': execution, 'output': output, 'output_truncated': truncated, 'error': error, 'variables': variables}
+        return {'execution_id': execution, 'output': output, 'output_truncated': truncated,
+                'error': error, 'error_line': error_line, 'error_object_type': error_object_type, 'error_detail': error_detail,
+                'variables': variables, 'variable_types': variable_types}
 
     def close(self):
         if self.closed: return

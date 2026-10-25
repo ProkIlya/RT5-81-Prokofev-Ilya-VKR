@@ -1,5 +1,17 @@
 # API Testing Agent
 
+## Выбранный исполнитель S09
+
+Основной путь — code: workspace SDK, изолированный worker, broker и agent loop. Отдельный structured runtime удалён; общий OpenAPI-каталог, policy/auth/HTTP/conditions/storage сохранены. CLI: `python -m api_agent.agent --help`, interface=code, pinned SDK/image и Project config. Default20 HTTP/24 steps/180s active/32768 total tokens, context8192. Будущий D79 применяется после S09.
+
+Технический профиль: `python scripts/check_selected_code.py` при PYTHONPATH=src;tests;. и WORKSPACE_DOCKER_TESTS=1, с pinned WORKSPACE_IMAGE. Tests остаются локальным комплектом и исключены Git по указанию владельца; для нового checkout нужно отдельно получить проверенный tests bundle и сверить hashes из отчёта S09. Gate без комплекта должен завершиться ошибкой, а не объявить успех. Исторические native gates ниже относятся к архивному дереву до удаления; полный прежний unittest discover не является профилем выбранного продукта.
+
+Реальные результаты S09, версии и ограничения хранятся в локальной документации: PROGRESS.md → docs/reports/S09 и evidence/S09/final-20261024-http20. Они передаются отдельно от Git. Успех технического профиля и короткий smoke не означают устойчивость на всём стенде.
+
+
+Целевая версия после S09: [обзор документации](docs/README.md), [план](PLAN.md), [решения D79](docs/project/decisions.md), [история](docs/project/project-knowledge.md), [конструктор](docs/project/condition-builder.md), [TUI](docs/project/UI.md), [STAND-v2](docs/testing/stand-v2-migration.md). Описанные ниже исторические CLI/gates отражают свои этапы; новые modes/completion/UI не считаются реализованными. S09 и его стенд остаются без изменений. Текущий статус — PROGRESS.md.
+
+
 **ВКР:** «Разработка интеллектуальной агентной системы функционального тестирования REST API по спецификации OpenAPI с использованием локальных языковых моделей».
 
 **Автор:** Прокофьев Илья Викторович, группа РТ5-81Б.

@@ -1,5 +1,8 @@
-"""Один ограниченный последовательный агент; сеть остаётся в границе S02."""
+"""Общие бюджеты; основной исполнитель находится в workspace.runtime."""
+from .execution.contracts import Limits
 
-from .runtime import Limits, StartAgentRun
+__all__ = ["Limits"]
 
-__all__ = ["Limits", "StartAgentRun"]
+def StartAgentRun(*args, **kwargs):
+    """Совместимость импортов старых test helpers, без исполнения и fallback."""
+    raise RuntimeError("structured_runtime_retired_use_workspace")

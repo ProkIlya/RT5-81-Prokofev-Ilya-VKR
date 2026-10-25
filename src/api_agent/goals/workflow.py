@@ -1,9 +1,11 @@
 """Принятый manifest использует существующие executor/policy/auth/validators."""
 from copy import deepcopy
+from ..state.sensitive import TestPassword
 import json
 import time
 
 from ..agent.catalog import CatalogWorkflow, CatalogSession, PhaseDecision
+from ..agent.model import configured_goal_model, goal_sampling
 from .compiler import check_goal, resolve_inputs, input_references
 from ..policy import PolicyStop
 from ..validation import fingerprint, schema_issues
@@ -19,8 +21,11 @@ class GoalWorkflow(CatalogWorkflow):
     application_tools = {'check_goal', 'ask_user'}
 
     def __init__(self, catalog, config, accepted, *, proposal, human, budget, preparation,
-                 extraction=None, binding_rules=None, auth=None, private_bodies=None, current_config=None, answer_diagnostic=False):
+                 extraction=None, binding_rules=None, auth=None, private_bodies=None, current_config=None, answer_diagnostic=False,
+                 model_name=None):
         self.accepted, self.human, self.preparation_budget = accepted, human, budget
+        self.model_name = model_name or configured_goal_model()
+        self.sampling = goal_sampling(self.model_name)
         self.preparation = deepcopy(preparation)
         self.preparation_active = preparation.get('active_seconds', 0)
         self.private_bodies = deepcopy(private_bodies or {})
@@ -30,8 +35,10 @@ class GoalWorkflow(CatalogWorkflow):
         conditions, occurrences = {}, []
         extraction, binding_rules = deepcopy(extraction or {}), deepcopy(binding_rules or {})
         self._project_extraction, self._project_bindings = deepcopy(extraction), deepcopy(binding_rules)
+        self._occurrence_bindings = {}
         for slot in manifest['slots']:
             name = slot['operation_id']
+            slot_bindings = deepcopy(self._project_bindings.get(name, {}))
             descriptors = []
             for condition in manifest['conditions']:
                 if condition['slot'] == slot['id'] and condition['predicate'] in {'status_in', 'json_value_equals', 'json_collection_matches'} and not input_references(condition['parameters']):
@@ -52,16 +59,39 @@ class GoalWorkflow(CatalogWorkflow):
                     existing = extraction.setdefault(source['operation_id'], {}).get(value['path'])
                     if existing and (existing.get('secret') or existing.get('type') != p['schema']['type']):
                         raise ValueError('goal_private_binding')
-                    original = binding_rules.get(name, {}).get(parameter)
+                    original = self._project_bindings.get(name, {}).get(parameter)
                     if original and any(original.get(k) != v for k, v in {'source_operation': source['operation_id'], 'source_path': value['path']}.items()):
                         raise ValueError('goal_binding_changed')
                     extraction[source['operation_id']][value['path']] = {'type': p['schema']['type'], 'secret': False}
-                    binding_rules.setdefault(name, {})[parameter] = {'source_operation': source['operation_id'],
+                    if original and original.get('source_occurrence', source['id']) != source['id']:
+                        raise ValueError('goal_binding_changed')
+                    slot_bindings[parameter] = {**(original or {}), 'source_operation': source['operation_id'],
                         'source_path': value['path'], 'source_occurrence': source['id']}
+                    binding_rules.setdefault(name, {}).setdefault(parameter, slot_bindings[parameter])
+            self._occurrence_bindings[slot['id']] = slot_bindings
         self._contract = {'manifest': manifest, 'manifest_hash': accepted.hash, 'proposal': deepcopy(proposal)}
+        request_auth = {name: 'anonymous_negative' for name in conditions
+            if all(s['auth_mode'] == 'anonymous_negative' for s in manifest['slots'] if s['operation_id'] == name)}
+        selection_scopes = {}
+        for slot in manifest['slots']:
+            name = slot['operation_id']
+            if catalog.operations[name]['method'] == 'GET' and any(p['in'] == 'query' for p in catalog.operations[name]['parameters']):
+                if not any(isinstance(v, dict) for v in slot['parameters'].values()):
+                    selection_scopes.setdefault(name, {'mode': 'exact', 'parameters': slot['parameters']})
         super().__init__(catalog, config, goal=manifest['goal'], conditions=conditions,
             extraction=extraction, binding_rules=binding_rules, auth=auth, occurrences=occurrences,
+            request_auth=request_auth, selection_scopes=selection_scopes,
             goal_coverage='complete', approval=self._approve, current_config=current_config)
+
+    def prepared(self, catalog, message, goal):
+        result = super().prepared(catalog, message, goal)
+        for slot in self.accepted.snapshot['slots']:
+            if catalog.operations[slot['operation_id']]['method'] == 'GET':
+                for condition in result['occurrence:' + slot['id']]:
+                    condition['selection_scope'] = ({'mode': 'first_request'}
+                        if any(isinstance(v, dict) for v in slot['parameters'].values())
+                        else {'mode': 'exact', 'parameters': deepcopy(slot['parameters'])})
+        return result
 
     def _approve(self, proposal):
         def redact(value):
@@ -82,8 +112,14 @@ class GoalWorkflow(CatalogWorkflow):
                 and any(c['slot'] == slot['id'] and c['predicate'] == 'status_in' and c['parameters'] == {'values': [401]}
                         for c in self.accepted.snapshot['conditions']))
 
+    def bindings_for(self, name, occurrence_id=None):
+        if occurrence_id in self._occurrence_bindings:
+            return self._occurrence_bindings[occurrence_id]
+        return super().bindings_for(name, occurrence_id)
+
     def runtime_manifest(self):
-        return {**super().runtime_manifest(), 'goal_contract': deepcopy(self._contract)}
+        return {**super().runtime_manifest(), 'goal_contract': deepcopy(self._contract),
+                'occurrence_bindings': deepcopy(self._occurrence_bindings)}
 
     def storage_metadata(self):
         if hasattr(self, '_snapshot_metadata'): return deepcopy(self._snapshot_metadata)
@@ -94,40 +130,9 @@ class GoalWorkflow(CatalogWorkflow):
             metadata['auth']['public_body_fields'] = list(self.auth.get('public_body_fields', []))
         return deepcopy(metadata)
 
-    def system(self):
-        return super().system() + (' Follow accepted occurrence slots exactly. Use check_goal for the application checklist. '
-            'ask_user can fill only a declared typed input; new requirements need a new Run. '
-            'finish_run should include claims:[{condition_id,verdict:PASS|FAIL|UNKNOWN}] for every accepted condition '
-            'and answer_fields:{answer_id:actual_value} from check_goal. A completed diagnostic task may have FAIL conditions.')
 
-    def initial_context(self, run, counter, **kwargs):
-        return super().initial_context(run, counter, **kwargs) + '\nAccepted goal: ' + json.dumps(self.accepted.snapshot, ensure_ascii=False)
 
-    def registry(self, catalog):
-        from .feedback import CLAIM_SCHEMA
-        registry = super().registry(catalog)
-        finish = next(t['function']['parameters'] for t in registry if t['function']['name'] == 'finish_run')
-        finish['properties'].update(claims=deepcopy(CLAIM_SCHEMA), answer_fields={'type': 'object'})
-        return registry + [
-            _tool('check_goal', {}, [], 'Check accepted requirements using saved evidence only, no HTTP.'),
-            _tool('ask_user', {'question': {'type': 'string', 'maxLength': 2000}, 'input_slot': {'type': 'string'}},
-                  ['question', 'input_slot'], 'Fill a previously accepted typed input slot; cannot change requirements.')]
 
-    def phase_decision(self, run, registry):
-        result = super().phase_decision(run, registry)
-        complete = any(((s.get('observation') or {}).get('data') or {}).get('checks_complete') is True for s in run.get('steps', []))
-        offered = result.tools + [t for t in registry if t['function']['name'] in self.application_tools
-                                 and (not complete or t['function']['name'] != 'ask_user')
-                                 and t['function']['name'] not in {x['function']['name'] for x in result.tools}]
-        for tool in offered:
-            if tool['function']['name'] == 'execute_operation':
-                body = tool['function']['parameters'].get('properties', {}).get('body')
-                slot = self.next_occurrence(run.get('exchanges', []))
-                private = self.private_bodies.get(slot['operation_id'], {}) if slot else {}
-                if body and private:
-                    body['properties'] = {k: v for k, v in body.get('properties', {}).items() if k not in private}
-                    body['required'] = [k for k in body.get('required', []) if k not in private]
-        return PhaseDecision(offered, result.tool_choice if complete else 'required')
 
     def decision(self, name, args):
         if name in self.application_tools:
@@ -169,7 +174,7 @@ class GoalWorkflow(CatalogWorkflow):
         return session
 
     def secrets(self):
-        return super().secrets() + self.human.secrets() + tuple(v for body in self.private_bodies.values() for v in body.values() if isinstance(v, str))
+        return super().secrets() + self.human.secrets() + tuple(v for body in self.private_bodies.values() for v in body.values() if isinstance(v, str) and not isinstance(v, TestPassword))
 
 
 class GoalSession(CatalogSession):

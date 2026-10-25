@@ -78,6 +78,7 @@ class FactHistory:
             if fingerprint(goal['manifest']) != goal['manifest_hash']: raise ValueError('goal_manifest_changed')
             for name in ('extraction', 'binding_rules'):
                 snapshot['metadata'][name] = manifest[name]
+            snapshot['metadata']['occurrence_bindings'] = manifest.get('occurrence_bindings', {})
         return snapshot
 
     def propose_fact(self, project, session, run_id, descriptor):

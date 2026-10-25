@@ -7,16 +7,21 @@ from ...validation import display_value
 class CatalogObservations:
     def observation(self, session, exchange, validation):
         values = []
+        login = bool(self.auth and exchange['operation_id'] == self.auth['login_operation'])
+        status = (exchange.get('response') or {}).get('status')
         if (
             exchange["outcome"] == "received"
             and validation["contract_verdict"] == "pass"
+            and (not login or type(status) is int and 200 <= status < 300)
         ):
-            if self.auth and exchange['operation_id'] == self.auth['login_operation']:
+            if login:
                 # Actor задаёт приложение; token никогда не является его именем.
-                session.state.begin_auth('configured_account')
+                values.append(session.state.remember(exchange, self.auth['token_path'],
+                    authenticate_as='configured_account'))
                 session.run['auth_state'] = {'auth_epoch': session.state.auth_epoch,
                                             'principal': session.state.principal}
             for path in self.extraction.get(exchange["operation_id"], {}):
+                if login and path == self.auth['token_path']: continue
                 values.append(session.state.remember(exchange, path))
         data = {
             "exchange_id": exchange["id"],
@@ -49,18 +54,21 @@ class CatalogObservations:
         public = session.state.public()
         _, effective = self._effective()
         hints = []
+        pending = self.next_occurrence(session.exchanges)
         for name in self.allowed:
             if name not in effective or name == exchange["operation_id"]:
                 continue
             op = self.catalog.operations[name]
+            mode = self.request_mode(name, pending if pending and pending['operation_id'] == name else None)
             bindings = {}
-            for destination, rule in self.binding_rules.get(name, {}).items():
+            for destination, rule in self.bindings_for(name, pending['id'] if pending and pending['operation_id'] == name else None).items():
                 refs = [
                     v["ref"]
                     for v in public
                     if not v["secret"]
                     and v["operation_id"] == rule["source_operation"]
                     and v["path"] == rule["source_path"]
+                    and ('source_occurrence' not in rule or v.get('occurrence_id') == rule['source_occurrence'])
                 ]
                 if refs:
                     bindings[destination] = refs
@@ -74,12 +82,12 @@ class CatalogObservations:
             ]
             auth_refs = [v['ref'] for v in public if v.get('auth_epoch') == session.state.auth_epoch
                          and v.get('principal') == session.state.principal and v['ref'] in auth_refs]
-            if not bindings and not (self.auth_mode(name) == 'authenticated' and auth_refs):
+            if not bindings and not (mode == 'authenticated' and auth_refs):
                 continue
             ready = (
                 all(p["name"] in bindings for p in op["parameters"] if p["required"])
                 and not op.get("requestBody", {}).get("required")
-                and (self.auth_mode(name) != 'authenticated' or bool(auth_refs))
+                and (mode != 'authenticated' or bool(auth_refs))
             )
             hint = {
                 "operation_id": name,
@@ -88,7 +96,7 @@ class CatalogObservations:
             }
             if bindings:
                 hint["bindings"] = bindings
-            if self.auth_mode(name) == 'authenticated' and auth_refs:
+            if mode == 'authenticated' and auth_refs:
                 hint["credential_refs"] = auth_refs
             hints.append(hint)
             if len(hints) == 3:
@@ -114,84 +122,8 @@ class CatalogObservations:
             data["next_hint"] = "Call finish_run with all finish_evidence_ids."
         return data
 
-    def read_response(self, session, args):
-        """Читать только сохранённый ответ собственного Run, после redaction."""
-        from ..response_views import response_page
-        exchange = next((e for e in session.exchanges if e["id"] == args["exchange_id"] and e["run_id"] == session.run["run_id"]), None)
-        if exchange is None or exchange.get("truncated") or exchange["outcome"] != "received" or ((exchange.get("response") or {}).get("json") is None and not (exchange.get("response") or {}).get("json_valid")):
-            raise ValueError("response_not_available")
-        body = session.state.redact(exchange["response"]["json"])
-        page = response_page(body, **{k: args[k] for k in ("json_pointer", "offset", "limit") if k in args})
-        return {"exchange_id":exchange["id"], "source":"HTTP_EXCHANGE", **page}
 
-    def model_result(self, result):
-        """Начальная bounded выдача; история шагов и полный ToolResult сохранены.
 
-        Это не compaction: данные всех ходов, schemas и native pairs остаются.
-        Пустые поля и дублируемые счётчики оболочки не нужны для выбора модели.
-        """
-        output = {"tool_execution": result["status"], "data": deepcopy(result["data"])}
-        for key in ("error", "evidence_ids", "omitted_fields"):
-            if result.get(key):
-                output[key] = deepcopy(result[key])
-        data = output.get("data")
-        if isinstance(data, dict) and "catalog_operation" in data:
-            # Секции уже определены native аргументами и содержимым схемы.
-            # Их техническое перечисление хранится в raw trace, не дублируется.
-            data.pop("sections", None)
-            data.pop("omitted_sections", None)
-        if isinstance(data, dict) and ("catalog_operation" in data or "items" in data) and result["status"] == "ok" and not result.get("error"):
-            # Успешное чтение каталога без HTTP; ошибки всегда явные.
-            output.pop("tool_execution", None)
-        if isinstance(data, dict) and data.get("runtime_values") == []:
-            data.pop("runtime_values")
-        if isinstance(data, dict) and "exchange_id" in data and "validation" in data:
-            http = {"outcome": data.pop("outcome"), "status_code": data.pop("status")}
-            if "response_json" in data:
-                http["body"] = data.pop("response_json")
-            data["http_response"] = http
-            # Полный body уже присутствует в проекции. Техническая метка
-            # старого DTO response.json здесь ложна; реальные omissions
-            # частичной/усечённой выдачи остаются и в prompt, и в raw trace.
-            if "body" in http and data.get("response_body_complete", True) and not result.get("truncated") and output.get("omitted_fields") == ["response.json"]:
-                output.pop("omitted_fields")
-            validation = data.pop("validation")
-            checks = {
-                "contract_verdict": validation["contract_verdict"],
-                "expectation_verdict": validation["intent_verdict"],
-                "evaluation_complete": validation["task_postcondition"],
-            }
-            if "expected_status_codes" in validation:
-                checks["expected_status_codes"] = validation["expected_status_codes"]
-            if "chain_check" in data:
-                # HTTP/schema и локальные predicates могут пройти, хотя сервер
-                # вернул другой связанный объект. Это тот же check, что в finish.
-                checks["response_expectation_verdict"] = checks["expectation_verdict"]
-                checks["chain_verdict"] = data["chain_check"]["verdict"]
-                if checks["chain_verdict"] == "fail":
-                    checks["expectation_verdict"] = "fail"
-            data["machine_checks"] = checks
-        if isinstance(data, dict) and data.get("checks_complete") is True:
-            # Finish определяет next_tool; повтор подсказки не является фактом.
-            # Native пары, criteria и все exchange IDs остаются в проекции.
-            data.pop("next_hint", None)
-        if isinstance(data, dict) and data.get("finish_evidence_ids"):
-            output.pop("evidence_ids", None)
-            for record in data.get("runtime_values", []):
-                record.pop("exchange_id", None)
-        if result.get("truncated"):
-            output["truncated"] = True
-        return output
-
-    @staticmethod
-    def model_content(public_result):
-        """Сериализовать уже маскированную проекцию без лишних JSON пробелов.
-
-        Компактное форматирование сохраняет все поля и значения. Экономия
-        действует на каждом последующем prompt; это не compaction истории.
-        Runtime сначала выполняет safe, затем вызывает эту сериализацию.
-        """
-        return json.dumps(public_result, ensure_ascii=False, separators=(",", ":"))
 
     def binding_check(self, session, exchange):
         """Проверить настроенные связи по данным обмена, без знания домена API.
@@ -203,7 +135,7 @@ class CatalogObservations:
 
         comparisons = []
         for name, expected in exchange.get("bound_inputs", {}).items():
-            rule = self.binding_rules.get(exchange["operation_id"], {}).get(name, {})
+            rule = self.bindings_for(exchange["operation_id"], exchange.get('occurrence_id')).get(name, {})
             path = rule.get("response_path")
             if not path:
                 continue

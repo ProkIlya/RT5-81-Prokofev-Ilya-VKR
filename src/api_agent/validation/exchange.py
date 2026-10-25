@@ -84,7 +84,10 @@ def validate_exchange(catalog, exchange, expectations):
         details = {}
         from .selection_scope import scope_result
         selection = scope_result(expectation, exchange)
-        if complete and (selection is None or selection['applicable']):
+        principal_scope = expectation.get('request_principal_scope')
+        principal_matches = principal_scope is None or all((exchange.get('request_principal') or {}).get(k) == v
+            for k, v in principal_scope.items())
+        if complete and principal_matches and (selection is None or selection['applicable']):
             if predicate == "status_in":
                 observed = response["status"] in params["values"]
             elif predicate == "content_type_is_json":

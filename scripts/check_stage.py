@@ -119,6 +119,15 @@ def post_stream(payload):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == 'S09e2' and sys.argv[2] in ('good', 'bad'):
+        from scripts.check_workspace_context import main as context_main
+        return context_main(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] == 'S09e1' and sys.argv[2] in ('good', 'bad'):
+        from scripts.check_s09e_preparation import main as preparation_main
+        return preparation_main(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] in ('S09d', 'S09d3') and sys.argv[2] in ('good', 'bad'):
+        from scripts.check_condition_integration import main as integration_main
+        return integration_main(sys.argv[2], stage=sys.argv[1])
     if len(sys.argv) == 3 and sys.argv[1] == 'S09d2' and sys.argv[2] in ('good', 'bad'):
         from scripts.check_workspace_sandbox import main as sandbox_main
         return sandbox_main(sys.argv[2])

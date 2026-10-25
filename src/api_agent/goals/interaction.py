@@ -17,15 +17,16 @@ class HumanInteraction:
         self.cancel = cancel or threading.Event()
         self.counts = {'preparation': 0, 'run': 0}
         self.events, self._private = [], {}
+        self._test_passwords = {}
         self.waited_seconds = 0.0
 
     def active_clock(self):
-        return time.monotonic() - self.waited_seconds
+        return time.perf_counter() - self.waited_seconds
 
     def _request(self, kind, payload):
         validate_tree(payload, max_bytes=16384)
         request = {'id': str(uuid.uuid4()), 'kind': kind, 'payload': deepcopy(payload), 'timeout_seconds': self.timeout}
-        started = time.monotonic()
+        started = time.perf_counter()
         replies = queue.Queue(maxsize=1)
         def collect():
             try: response = self.reader(deepcopy(request)) if self.reader else None
@@ -34,18 +35,18 @@ class HumanInteraction:
         threading.Thread(target=collect, daemon=True).start()
         response = None
         try:
-            while not self.cancel.is_set() and time.monotonic() - started < self.timeout:
+            while not self.cancel.is_set() and time.perf_counter() - started < self.timeout:
                 try:
-                    response = replies.get(timeout=min(0.02, max(0.001, self.timeout - (time.monotonic() - started))))
+                    response = replies.get(timeout=min(0.02, max(0.001, self.timeout - (time.perf_counter() - started))))
                     break
                 except queue.Empty: pass
         finally:
-            self.waited_seconds += time.monotonic() - started
-        valid = (not self.cancel.is_set() and time.monotonic() - started < self.timeout
+            self.waited_seconds += time.perf_counter() - started
+        valid = (not self.cancel.is_set() and time.perf_counter() - started < self.timeout
                  and isinstance(response, dict) and set(response) == {'request_id', 'value'}
                  and response['request_id'] == request['id'] and response['value'] is not None)
         self.events.append({'request_id': request['id'], 'kind': kind, 'status': 'answered' if valid else 'unanswered',
-                            'wait_seconds': time.monotonic() - started})
+                            'wait_seconds': time.perf_counter() - started})
         if not valid:
             raise ValueError('human_cancelled' if self.cancel.is_set() else 'human_unanswered')
         validate_tree(response['value'], max_bytes=8192)
@@ -82,10 +83,14 @@ class HumanInteraction:
         return self._private[ref]
 
     def secrets(self):
-        return tuple(self._private.values())
+        return tuple(value for value in self._private.values() if value not in self._test_passwords)
+
+    def classify_test_passwords(self, marked):
+        self._test_passwords = dict(marked)
 
     def public_events(self):
         return deepcopy(self.events)
 
     def close(self):
         self._private.clear()
+        self._test_passwords.clear()

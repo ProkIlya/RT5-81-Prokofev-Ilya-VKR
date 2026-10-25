@@ -6,7 +6,9 @@ from ...agent.chains import ChainLimits
 class CatalogLimits(ChainLimits):
     """Две correction-попытки общего registry; каждый ход расходует тот же budget."""
 
+    max_requests: int = 20
     max_context_tokens: int = 8192
+    max_output_tokens: int = 1024
     max_tokens_total: int = 32768
     max_prompt_bytes: int = 65536
     malformed_retries: int = 2

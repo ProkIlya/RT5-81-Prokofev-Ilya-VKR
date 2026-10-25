@@ -4,6 +4,7 @@
 Проверка policy, входов, фактов и evidence принадлежит внешнему broker S09d2.
 """
 import ast
+from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
@@ -14,10 +15,11 @@ import re
 
 from ..bounded_json import validate_tree
 from ..openapi.parser import canonical, pointer_get, pointer_part
+from ..openapi.documentation import documentation_preview
 from ..policy import ProjectConfig
 from ..validation import fingerprint
 
-BUILDER_VERSION = 'workspace-sdk-v1'
+BUILDER_VERSION = 'workspace-sdk-v3'
 METADATA_VERSION = 'workspace-metadata-v1'
 FACADES = {'list_operations', 'search', 'describe', 'check_goal', 'ask_user', 'propose_fact', 'finish'}
 MISSING = object()
@@ -27,6 +29,20 @@ def _name(value, prefix, reserved=()):
     if len(value) <= 64 and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', value) and not keyword.iskeyword(value) and value not in reserved and not value.startswith(prefix):
         return value
     return prefix + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _operation_names(names):
+    """Читаемые aliases при безопасной уникальной замене пунктуации; иначе hash."""
+    reserved = FACADES | {'locals'}
+    result = {name: _name(name, 'op_', reserved) for name in names}
+    candidates = {name: re.sub(r'[^A-Za-z0-9_]', '_', name)
+                  for name in names if result[name] != name}
+    counts = Counter(candidates.values())
+    for name, candidate in candidates.items():
+        if (counts[candidate] == 1 and candidate not in result.values()
+                and _name(candidate, 'op_', reserved) == candidate):
+            result[name] = candidate
+    return result
 
 
 def _source(operations):
@@ -42,6 +58,9 @@ def _source(operations):
             if isinstance(p['schema'].get('type'), str) else ast.Constant('object')) for p in fields]
         function.args.kw_defaults = [None if p['required'] else ast.Name(id='_MISSING', ctx=ast.Load()) for p in fields]
         function.body[0].value.args[0] = ast.Constant(name)
+        notes = documentation_preview(operation, operation.get('documentation', {}))
+        if notes:
+            function.body.insert(0, ast.Expr(value=ast.Constant(json.dumps(notes, ensure_ascii=False))))
         functions.append(function)
     return ast.unparse(ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))) + '\n'
 
@@ -56,10 +75,11 @@ def build_sdk(catalog, config):
         if checked.snapshot != snapshot: raise ValueError()
     except (ValueError, KeyError, TypeError): raise ValueError('sdk_stale_or_invalid_config') from None
     operations = {}
+    names = _operation_names(snapshot['operations'])
     for name in sorted(snapshot['operations']):
         op = catalog.operations[name]
         body = op.get('requestBody', {})
-        operations[name] = {'python_name': _name(name, 'op_', FACADES | {'locals'}), 'operation_hash': catalog.operation_hashes[name],
+        operations[name] = {'python_name': names[name], 'operation_hash': catalog.operation_hashes[name],
             'method': op['method'], 'path': op['path'], 'security': op['security'], 'responses': op['responses'],
             'body': body.get('content', {}).get('application/json', {}).get('schema'), 'body_required': body.get('required', False),
             'parameter_mapping': [{**p, 'python_name': p['in'] + '__' + _name(p['name'], 'p_')} for p in op['parameters']],
@@ -127,7 +147,8 @@ class SdkArtifact:
             if directory.is_symlink() or any((directory / name).is_symlink() for name in ('manifest.json', 'sdk.py')): raise ValueError()
             if (directory / 'manifest.json').stat().st_size > 4194304: raise ValueError()
             manifest = json.loads((directory / 'manifest.json').read_bytes())
-            if manifest.pop('artifact_hash') != expected_hash or manifest['builder_version'] != BUILDER_VERSION: raise ValueError()
+            if (manifest.pop('artifact_hash') != expected_hash
+                    or manifest['builder_version'] not in {'workspace-sdk-v1', BUILDER_VERSION}): raise ValueError()
             artifact = cls(canonical(manifest))
             if artifact.hash != expected_hash or (directory / 'sdk.py').read_bytes() != artifact.source.encode(): raise ValueError()
             if hashlib.sha256(artifact.source.encode()).hexdigest() != manifest['source_hash']: raise ValueError()

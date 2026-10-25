@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from copy import deepcopy
 import math
+import re
 from ...transport.http import PolicyDenied
 
 def _exact_registry(registry, variants):
@@ -48,13 +49,18 @@ def _exact_registry(registry, variants):
 def _validate_extraction(catalog, operation, status, path, kind, *, secret=False):
     """До Run сверяем доверенное правило извлечения с исходной схемой ответа.
 
-    Путь относится к данным, поэтому каждый сегмент переводится в properties
-    схемы. Секретные литералы в enum нельзя публиковать через inspect_operation.
+    Объектный сегмент переводится в properties, индекс массива — в items.
+    Секретные литералы в enum нельзя публиковать через inspect_operation.
     """
     pointer = f"/responses/{status}/content/application~1json/schema"
-    for segment in path.lstrip("/").split("/"):
-        pointer += "/properties/" + segment
     try:
+        for segment in path.lstrip("/").split("/"):
+            parent = catalog.resolve_basis(operation, pointer, catalog.operation_hashes[operation])
+            if parent.get('type') == 'array':
+                if not re.fullmatch(r'0|[1-9][0-9]*', segment): raise ValueError('invalid_array_index')
+                pointer += '/items'
+            else:
+                pointer += '/properties/' + segment
         schema = catalog.resolve_basis(
             operation, pointer, catalog.operation_hashes[operation]
         )

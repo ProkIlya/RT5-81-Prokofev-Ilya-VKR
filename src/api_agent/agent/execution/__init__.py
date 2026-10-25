@@ -1,1 +1,1 @@
-"""Внутренние части единственного structured agent loop."""
+"""Общие типы бюджетов; native structured loop удалён по D80."""

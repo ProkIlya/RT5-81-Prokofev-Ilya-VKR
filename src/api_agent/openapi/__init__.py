@@ -5,7 +5,7 @@
 Снимок содержит только поддержанные декларации, без свободного текста/примеров.
 """
 
-from .parser import Catalog, OpenApiError, parse_document
-from .source import load_source
+from api_agent.openapi.parser import Catalog, OpenApiError, parse_document
+from api_agent.openapi.source import load_source
 
 __all__ = ["Catalog", "OpenApiError", "parse_document", "load_source"]

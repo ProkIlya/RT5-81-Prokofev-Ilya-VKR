@@ -3,7 +3,7 @@ import json
 import time
 
 
-from .common import _key, _json
+from api_agent.storage.common import _key, _json
 
 class FactHistory:
     def _fact_policy(self, project):
@@ -20,7 +20,7 @@ class FactHistory:
             self._fact_policy(project)
             self.db.execute('UPDATE fact_projects SET response_observation=?,create_read_link=? WHERE project_key=?',
                             (response_observation, create_read_link, _key(project)))
-            from ..validation import fingerprint
+            from api_agent.validation import fingerprint
             limits = {'response_observation': response_observation, 'create_read_link': create_read_link}
             for row in self.db.execute('SELECT * FROM project_facts WHERE project_key=?', (_key(project),)).fetchall():
                 fact = self._fact_record(row)
@@ -37,9 +37,9 @@ class FactHistory:
             return self._fact_policy(project)['reset_epoch']
 
     def _propose_fact(self, project, session, run_id, descriptor, *, preview=False):
-        from ..validation.facts import verify_fact, fact_view
-        from ..openapi.parser import Catalog, canonical
-        from ..validation import fingerprint
+        from api_agent.validation.facts import verify_fact, fact_view
+        from api_agent.openapi.parser import Catalog, canonical
+        from api_agent.validation import fingerprint
         run = self.read_run(project, session, run_id)
         row = self.db.execute('SELECT lifecycle FROM runs WHERE run_id=?', (run_id,)).fetchone()
         if row['lifecycle'] != 'finalized' and not preview:
@@ -58,7 +58,7 @@ class FactHistory:
 
     def _fact_record(self, row):
         """Отпечаток ловит повреждение DTO; SQL-связи определяют Project/Run."""
-        from ..validation import fingerprint
+        from api_agent.validation import fingerprint
         fact = json.loads(row['payload'])
         origin = self.db.execute('SELECT payload FROM runs WHERE run_id=? AND project_key=?',
                                  (row['run_id'], row['project_key'])).fetchone()
@@ -74,7 +74,7 @@ class FactHistory:
         manifest = run.get('admission_manifest') or {}
         goal = manifest.get('goal_contract')
         if goal:
-            from ..validation import fingerprint
+            from api_agent.validation import fingerprint
             if fingerprint(goal['manifest']) != goal['manifest_hash']: raise ValueError('goal_manifest_changed')
             for name in ('extraction', 'binding_rules'):
                 snapshot['metadata'][name] = manifest[name]
@@ -93,8 +93,8 @@ class FactHistory:
 
     def invalidate_fact(self, project, fact_id, session, run_id, exchange_id):
         """Сохранить опровержение без удаления исходного значения и evidence."""
-        from ..validation.facts import contradict_fact
-        from ..validation import fingerprint
+        from api_agent.validation.facts import contradict_fact
+        from api_agent.validation import fingerprint
         with self.transaction():
             row = self.db.execute('SELECT * FROM project_facts WHERE fact_id=? AND project_key=?',
                                   (fact_id, _key(project))).fetchone()
@@ -111,7 +111,7 @@ class FactHistory:
             return fact
 
     def _collect_facts(self, project, session, run_id):
-        from ..validation.facts import automatic_proposals
+        from api_agent.validation.facts import automatic_proposals
         from itertools import chain
         run = self.read_run(project, session, run_id)
         if not run.get('contract'):
@@ -127,7 +127,7 @@ class FactHistory:
 
     def read_facts(self, project, *, catalog, operation_ids=None, now=None, include_inactive=False):
         """Без HTTP/LLM: Project facts доступны новой Session с текущими hashes."""
-        from ..validation.facts import checked_time, fact_view
+        from api_agent.validation.facts import checked_time, fact_view
         now = checked_time(time.time() if now is None else now)
         if self.db.execute('PRAGMA user_version').fetchone()[0] < 2:
             return []

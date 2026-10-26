@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from ..bounded_json import validate_tree
+from api_agent.bounded_json import validate_tree
 
 class StorageError(ValueError):
     """Безопасная причина отказа: SQL/пути/исходные значения не публикуются."""

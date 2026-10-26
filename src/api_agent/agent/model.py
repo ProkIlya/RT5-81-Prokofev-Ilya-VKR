@@ -9,10 +9,10 @@ import json
 import os
 import time
 from copy import deepcopy
-from ..transport.http import loopback_origin
-from ..transport.socket_deadline import SocketDeadline
-from .streaming import collect_stream
-from ..bounded_json import validate_tree, numeric_metadata
+from api_agent.transport.http import loopback_origin
+from api_agent.transport.socket_deadline import SocketDeadline
+from api_agent.agent.streaming import collect_stream
+from api_agent.bounded_json import validate_tree, numeric_metadata
 
 
 def configured_goal_model():
@@ -34,12 +34,6 @@ def goal_sampling(model_name=None):
     return {'temperature': 1.0, 'top_p': 0.95, 'min_p': 0.0}
 
 
-def preparation_sampling(model_name=None):
-    """Профиль структурированной подготовки, отдельно от primary/code."""
-    if qwen35_4b(model_name):
-        return {'temperature': 0.6, 'top_p': 0.95, 'top_k': 20, 'min_p': 0.0,
-                'presence_penalty': 0.0, 'repeat_penalty': 1.0}
-    return goal_sampling(model_name)
 
 
 class ModelError(RuntimeError):
@@ -63,8 +57,6 @@ class ModelTimeout(TimeoutError):
 class LocalModel:
     """Адаптер локального llama-server с ограничениями времени и размера SSE."""
 
-    supports_json_schema = True
-    supports_condition_contract = True
 
     def __init__(self, base, *, deadline=None, timeout=90):
         self.base, self.port = loopback_origin(base)

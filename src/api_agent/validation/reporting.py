@@ -1,7 +1,7 @@
 """Канонический отчёт по сохранённым проверкам и evidence."""
 from copy import deepcopy
 
-from ..openapi.parser import canonical
+from api_agent.openapi.parser import canonical
 
 
 def report(run):
@@ -10,6 +10,9 @@ def report(run):
     Это передаваемая сводка; автоматическое восстановление и повтор эффектов
     здесь отсутствуют. Свободная цель не объявляется полностью формализованной.
     """
+    if ((run.get('admission_manifest') or {}).get('goal_contract') or {}).get('manifest', {}).get('contract') == 'selected-checks-v1':
+        from api_agent.validation.selected_reporting import selected_report
+        return selected_report(run)
     result = deepcopy(run.get("validation") or {})
     # Один exchange оценивается один раз; read_response и копии DTO не
     # увеличивают число нарушений. Поздний PASS не стирает прежний mismatch.
@@ -29,7 +32,7 @@ def report(run):
     intent_exchange = result.get('exchange_id')
     if run.get('chain_verdict') in {'pass','fail'} and any(
         c.get('selection_scope',{}).get('applicable') is False for c in result.get('checks',[])):
-        from .selection_scope import applicable
+        from api_agent.validation.selection_scope import applicable
         matched = next((v for v in reversed(run.get('validations',[])) if applicable(v) and v['task_postcondition']),None)
         if matched:
             result.update(checks=deepcopy(matched['checks']),intent_verdict=run['chain_verdict'],task_postcondition=True)
@@ -41,7 +44,7 @@ def report(run):
         # Успешный login не завершает ещё не выполненную бизнес-цепочку.
         result['intent_verdict'] = 'not_checked'
         result['task_postcondition'] = False
-    from .selection_scope import applicable
+    from api_agent.validation.selection_scope import applicable
     failed = next((v for v in assessed.values() if v.get('intent_verdict') == 'fail' and applicable(v)), None)
     if failed is not None:
         result.update(intent_verdict='fail', task_postcondition=True, checks=deepcopy(failed['checks']))
@@ -162,15 +165,15 @@ def report(run):
     goal_checklist = None
     goal_contract = (run.get('admission_manifest') or {}).get('goal_contract')
     if goal_contract:
-        from ..goals.compiler import AcceptedGoal, check_goal
-        from ..openapi.parser import Catalog
+        from api_agent.goals.checks.compiler import AcceptedGoal, check_goal
+        from api_agent.openapi.parser import Catalog
         accepted = AcceptedGoal(canonical(goal_contract['manifest']))
         if accepted.hash != goal_contract['manifest_hash']:
             raise ValueError('goal_manifest_changed')
         goal_checklist = check_goal(accepted, Catalog(canonical(run['contract'])), run)
         goal_verdict = ('FAIL' if checks_verdict == 'FAIL' or goal_checklist['verdict'] == 'FAIL' else
                         'PASS' if run['status'] == 'completed' and goal_checklist['verdict'] == 'PASS' else 'UNKNOWN')
-        from ..goals.completion import final_state_policy
+        from api_agent.validation.legacy_results import final_state_policy
         if final_state_policy(run):
             goal_verdict = ('FAIL' if goal_checklist['verdict'] == 'FAIL' else
                 'PASS' if run['status'] == 'completed' and goal_checklist['verdict'] == 'PASS' else 'UNKNOWN')
@@ -179,7 +182,7 @@ def report(run):
                        'UNKNOWN': 'Цель не подтверждена полностью.'}[goal_verdict]
     answer = None
     if goal_checklist is not None:
-        from ..goals.feedback import build_feedback
+        from api_agent.validation.legacy_results import build_feedback
         answer = build_feedback({**run, 'report': {'goal_verdict': goal_verdict, 'goal_checklist': goal_checklist,
             'contract_verdict': result.get('contract_verdict', 'not_checked')}})
     return {

@@ -6,9 +6,9 @@
 
 import re
 
-from .model import OpenApiError, canonical, pointer_part, pointer_get, Catalog, object_keys, nonempty, sensitive, PROFILE_VERSION, PARSER_VERSION, MAX_BYTES, MAX_DEPTH, MAX_NODES, METHODS, KINDS, TYPES
-from .model import _annotation
-from .schema import SchemaParser
+from api_agent.openapi.model import OpenApiError, canonical, pointer_part, pointer_get, Catalog, object_keys, nonempty, sensitive, PROFILE_VERSION, PARSER_VERSION, MAX_BYTES, MAX_DEPTH, MAX_NODES, METHODS, KINDS, TYPES
+from api_agent.openapi.model import _annotation
+from api_agent.openapi.schema import SchemaParser
 
 class Parser(SchemaParser):
     """Один документ, ограниченный счётчик и refs только из его components."""

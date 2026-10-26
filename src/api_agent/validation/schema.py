@@ -2,7 +2,7 @@
 import math
 import re
 
-from ..openapi.parser import canonical, pointer_part
+from api_agent.openapi.parser import canonical, pointer_part
 
 
 def schema_issues(value, schema, path="", schema_path=""):

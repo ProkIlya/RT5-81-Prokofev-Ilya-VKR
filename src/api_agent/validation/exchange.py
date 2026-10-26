@@ -1,10 +1,10 @@
 """Проверка HTTP exchange: независимые contract и intent verdict."""
 from copy import deepcopy
 
-from ..openapi.parser import canonical, pointer_get
+from api_agent.openapi.parser import canonical, pointer_get
 
-from .common import fingerprint, display_value
-from .schema import schema_issues
+from api_agent.validation.common import fingerprint, display_value
+from api_agent.validation.schema import schema_issues
 
 def validate_exchange(catalog, exchange, expectations):
     """Проверить ответ до redaction и вернуть независимые contract/intent.
@@ -82,7 +82,7 @@ def validate_exchange(catalog, exchange, expectations):
         )
         observed = None
         details = {}
-        from .selection_scope import scope_result
+        from api_agent.validation.selection_scope import scope_result
         selection = scope_result(expectation, exchange)
         principal_scope = expectation.get('request_principal_scope')
         principal_matches = principal_scope is None or all((exchange.get('request_principal') or {}).get(k) == v

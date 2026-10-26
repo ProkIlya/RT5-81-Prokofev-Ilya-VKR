@@ -1,5 +1,5 @@
 """Ограниченная проекция существующих annotations, без изменения API-контракта."""
-from .model import canonical, pointer_part, sensitive
+from api_agent.openapi.model import canonical, pointer_part, sensitive
 
 
 def documentation_preview(operation, annotations):

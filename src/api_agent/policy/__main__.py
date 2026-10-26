@@ -3,8 +3,8 @@
 import argparse
 import json
 from pathlib import Path
-from . import ProjectConfig
-from ..openapi import load_source
+from api_agent.policy.config import ProjectConfig
+from api_agent.openapi import load_source
 
 
 def main(argv=None):

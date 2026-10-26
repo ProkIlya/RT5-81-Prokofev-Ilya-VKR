@@ -15,14 +15,17 @@ import threading
 import time
 import uuid
 
-from ..bounded_json import validate_tree
-from ..transport.http import loopback_origin
-from ..validation import report
+from api_agent.bounded_json import validate_tree
+from api_agent.transport.http import loopback_origin
+from api_agent.validation import report
 
-from .common import StorageError, _key, _json
-from .fact_history import FactHistory
+from api_agent.storage.common import StorageError, _key, _json
+from api_agent.storage.fact_history import FactHistory
+from api_agent.storage.results import ResultHistory
+from api_agent.storage.selections import SelectionHistory
+from api_agent.storage.pins import PinHistory
 
-class SQLiteHistory(FactHistory):
+class SQLiteHistory(SelectionHistory, PinHistory, ResultHistory, FactHistory):
     """Одна база для Projects; чтение истории не требует сетевых адаптеров."""
 
     def __init__(self, path, *, read_only=False):
@@ -74,20 +77,30 @@ class SQLiteHistory(FactHistory):
 
     def _migrate(self):
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 3:
+        if version > 5:
             raise StorageError("unsupported_schema_version")
-        if version == 3 or (version in (1, 2) and self.read_only):
+        if version == 5 or (version in (1, 2, 3, 4) and self.read_only):
+            return
+        if version in {3,4}:
+            script = (Path(__file__).parent / 'sql' / {3:'results.sql',4:'pins.sql'}[version]).read_text(encoding='utf-8')
+            try:
+                self.db.executescript('BEGIN IMMEDIATE;\n' + script + '\nPRAGMA user_version='+str(version+1)+';\nCOMMIT;')
+            except sqlite3.Error:
+                if self.db.in_transaction: self.db.execute('ROLLBACK')
+                raise StorageError('migration_failed') from None
+            self._migrate()
             return
         if version == 2:
-            script = Path(__file__).with_name('preparations.sql').read_text(encoding='utf-8')
+            script = (Path(__file__).parent / 'sql' / 'preparations.sql').read_text(encoding='utf-8')
             try:
                 self.db.executescript('BEGIN IMMEDIATE;\n' + script + '\nPRAGMA user_version=3;\nCOMMIT;')
             except sqlite3.Error:
                 if self.db.in_transaction: self.db.execute('ROLLBACK')
                 raise StorageError('migration_failed') from None
+            self._migrate()
             return
         if version == 1:
-            script = Path(__file__).with_name('facts.sql').read_text(encoding='utf-8')
+            script = (Path(__file__).parent / 'sql' / 'facts.sql').read_text(encoding='utf-8')
             try:
                 self.db.executescript('BEGIN IMMEDIATE;\n' + script + '\nPRAGMA user_version=2;\nCOMMIT;')
             except sqlite3.Error:
@@ -104,7 +117,7 @@ class SQLiteHistory(FactHistory):
             with closing(sqlite3.connect(backup)) as destination:
                 self.db.backup(destination)
             raise StorageError("unrecognized_schema_backup_saved")
-        script = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+        script = (Path(__file__).parent / 'sql' / 'schema.sql').read_text(encoding="utf-8")
         try:
             self.db.executescript("BEGIN IMMEDIATE;\n" + script + "\nPRAGMA user_version=1;\nCOMMIT;")
         except sqlite3.Error:
@@ -292,11 +305,14 @@ class SQLiteHistory(FactHistory):
     def _finalize(self, row, run):
         """Итог, assistant Message и эпизод фиксируются одной транзакцией."""
         if row["lifecycle"] == "finalized":
+            self._validate_report_snapshot(run['project_id'],run['session_id'],json.loads(row['payload']))
             if _json(run) != row["payload"]:
                 raise ValueError("finalized_run_immutable")
             return
+        self._save_report(row, run)
         answer_id = run["response_message_id"]
-        self.db.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?)", (_key(answer_id), row["project_key"], row["session_key"], answer_id, "assistant", run["report"]["summary"], run["run_id"]))
+        answer_text = (run['report'].get('model_answer') or {}).get('text') or run['report']['summary']
+        self.db.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?)", (_key(answer_id), row["project_key"], row["session_key"], answer_id, "assistant", answer_text, run["run_id"]))
         episode = {
             "outcome": run["status"], "stop_reason": run["stop_reason"],
             "summary": run["report"]["summary"], "spec_hash": run["spec_hash"],
@@ -331,14 +347,21 @@ class SQLiteHistory(FactHistory):
                     run.update(uncertain_write=True, primary_safety_cause='uncertain_write',
                                secondary_stop_reason='interrupted', stop_reason='uncertain_write',
                                stop_category='needs_human')
-                run["report"] = report(run)
-                if not uncertain:
-                    run["report"]["summary"] = "Запуск прерван; внешний результат может быть неизвестен. Автоматического повтора нет."
                 run["response_message_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "answer:" + run["run_id"]))
+                run["report"] = report(run)
+                if not uncertain and run['report'].get('schema_version')!='run-report-v1':
+                    run["report"]["summary"] = "Запуск прерван; внешний результат может быть неизвестен. Автоматического повтора нет."
                 self._finalize(row, run)
 
     def read_run(self, project, session, run_id):
-        row = self.db.execute("SELECT runs.payload, snapshots.payload AS snapshot_payload, snapshots.spec_hash FROM runs JOIN snapshots USING(snapshot_id) WHERE run_id=? AND runs.project_key=? AND session_key=?", (run_id, *self._scope(project, session))).fetchone()
+        run,lifecycle=self._load_run(project,session,run_id)
+        if lifecycle=='finalized' or run.get('report'):
+            self._validate_report_snapshot(project,session,run)
+        return run
+
+    def _load_run(self, project, session, run_id):
+        """Внутренний SQL loader; публичные callers проходят read_run guard."""
+        row = self.db.execute("SELECT runs.payload,runs.lifecycle, snapshots.payload AS snapshot_payload, snapshots.spec_hash FROM runs JOIN snapshots USING(snapshot_id) WHERE run_id=? AND runs.project_key=? AND session_key=?", (run_id, *self._scope(project, session))).fetchone()
         if row is None:
             raise ValueError("foreign_or_unknown_run")
         run = json.loads(row["payload"])
@@ -346,7 +369,7 @@ class SQLiteHistory(FactHistory):
         # SQL scope не делает подменённый JSON собственным историческим trace.
         if run.get("run_id") != run_id or run.get("contract") != snapshot.get("contract") or run.get("spec_hash") != row["spec_hash"]:
             raise ValueError("run_snapshot_binding_mismatch")
-        return run
+        return run,row['lifecycle']
 
     def run_for_message(self, project, session, message):
         run = self.lookup(project, session, message)

@@ -14,6 +14,8 @@ reports/
 .env.*
 config
 config.*
+# Исходник приложения с именем config не относится к локальным настройкам.
+!/src/api_agent/policy/config.py
 *.key
 *.pem
 

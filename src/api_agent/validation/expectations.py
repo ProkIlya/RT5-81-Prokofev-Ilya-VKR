@@ -3,10 +3,10 @@ from copy import deepcopy
 import re
 import uuid
 
-from ..bounded_json import validate_tree
-from ..openapi.parser import canonical
+from api_agent.bounded_json import validate_tree
+from api_agent.openapi.parser import canonical
 
-from .common import PREDICATES, SOURCES
+from api_agent.validation.common import PREDICATES, SOURCES
 
 def prepare_expectations(
     catalog, conditions, message_id, goal, *, operation_id="getPet", expected_status=200

@@ -2,7 +2,7 @@
 from copy import deepcopy
 import hashlib
 
-from ..openapi.parser import canonical
+from api_agent.openapi.parser import canonical
 
 PREDICATES = {
     "status_in",

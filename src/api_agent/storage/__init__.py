@@ -1,5 +1,5 @@
 """SQLite-история: хранение безопасных снимков, без исполнения HTTP/LLM."""
 
-from .history import SQLiteHistory, StorageError
+from api_agent.storage.history import SQLiteHistory, StorageError
 
 __all__ = ["SQLiteHistory", "StorageError"]

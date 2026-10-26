@@ -6,7 +6,7 @@ message. Diagnostics содержат только счётчик событий
 """
 
 import json
-from ..bounded_json import validate_tree
+from api_agent.bounded_json import validate_tree
 
 
 def collect_stream(lines, on_token=None):

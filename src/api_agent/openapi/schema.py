@@ -2,8 +2,8 @@
 import json
 import math
 
-from .model import OpenApiError, canonical, pointer_part, pointer_get, object_keys, nonempty, sensitive, MAX_DEPTH, MAX_NODES, TYPES
-from .model import _annotation
+from api_agent.openapi.model import OpenApiError, canonical, pointer_part, pointer_get, object_keys, nonempty, sensitive, MAX_DEPTH, MAX_NODES, TYPES
+from api_agent.openapi.model import _annotation
 
 class SchemaParser:
     def walk(self, value, kind, path, stack=(), depth=0, secret=False):

@@ -8,10 +8,10 @@ from copy import deepcopy
 import math
 from urllib.parse import quote, urlsplit
 
-from ..bounded_json import validate_tree
-from ..openapi.parser import Catalog, canonical, pointer_get
-from .common import fingerprint
-from .exchange import validate_exchange
+from api_agent.bounded_json import validate_tree
+from api_agent.openapi.parser import Catalog, canonical, pointer_get
+from api_agent.validation.common import fingerprint
+from api_agent.validation.exchange import validate_exchange
 
 TYPES = {'declared_contract', 'response_observation', 'create_read_link'}
 SOURCES = {'DECLARED', 'OBSERVED', 'INFERRED', 'USER_PROVIDED'}

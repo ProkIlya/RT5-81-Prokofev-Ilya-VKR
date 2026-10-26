@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 import json
-from ..openapi.parser import pointer_get
+from api_agent.openapi.parser import pointer_get
 
 
 def _bytes(value):

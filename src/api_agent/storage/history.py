@@ -184,6 +184,12 @@ class SQLiteHistory(SelectionHistory, PinHistory, ResultHistory, FactHistory):
         saved = json.loads(row['payload'])
         return self.read_run(project, saved['session_id'], run_id)
 
+    def assert_continuation_available(self, project, run_id):
+        """Один child продолжения; ветвление не пополняет общий бюджет."""
+        for row in self.db.execute('SELECT payload FROM runs WHERE project_key=? AND parent_run_id=?', (_key(project), run_id)):
+            if json.loads(row['payload']).get('continuation'):
+                raise ValueError('continuation_already_started')
+
     def goal_project_metadata(self, config, metadata):
         """Project mappings остаются pinned; goal/occurrences принадлежат Run."""
         row = self.db.execute('SELECT payload FROM snapshots WHERE project_key=? AND config_version=?',
@@ -242,6 +248,8 @@ class SQLiteHistory(SelectionHistory, PinHistory, ResultHistory, FactHistory):
             self.db.execute("INSERT OR IGNORE INTO projects VALUES(?,?,?)", (project_key, target, environment))
             self.db.execute('INSERT OR IGNORE INTO fact_projects(project_key) VALUES(?)', (project_key,))
             if run.get("parent_run_id"):
+                if run.get('continuation'):
+                    self.assert_continuation_available(project, run['parent_run_id'])
                 parent = self.db.execute("SELECT project_key, lifecycle FROM runs WHERE run_id=?", (run["parent_run_id"],)).fetchone()
                 if parent is None or parent["project_key"] != project_key or parent["lifecycle"] != "finalized":
                     raise ValueError("foreign_or_unfinished_parent")
@@ -270,7 +278,7 @@ class SQLiteHistory(SelectionHistory, PinHistory, ResultHistory, FactHistory):
             if row is None:
                 raise ValueError("unknown_run")
             previous = json.loads(row["payload"])
-            for name in ("project_id", "session_id", "message_id", "target", "contract", "spec_hash", "goal", "goal_hash", "parent_run_id", "admission_manifest"):
+            for name in ("project_id", "session_id", "message_id", "target", "contract", "spec_hash", "goal", "goal_hash", "parent_run_id", "admission_manifest", "continuation"):
                 if run.get(name) != previous.get(name):
                     raise ValueError("run_identity_changed")
             if row["lifecycle"] == "finalized" and _json(run) != row["payload"]:
@@ -328,7 +336,7 @@ class SQLiteHistory(SelectionHistory, PinHistory, ResultHistory, FactHistory):
             if row is None or (row["project_key"], row["session_key"]) != self._scope(project, session) or row["original_message_key"] != _key(message):
                 raise ValueError("finalization_scope_mismatch")
             previous = json.loads(row["payload"])
-            for name in ("project_id", "session_id", "message_id", "goal", "target", "spec_hash", "contract", "parent_run_id", "admission_manifest"):
+            for name in ("project_id", "session_id", "message_id", "goal", "target", "spec_hash", "contract", "parent_run_id", "admission_manifest", "continuation"):
                 if previous.get(name) != run.get(name):
                     raise ValueError("run_identity_changed")
             self._finalize(row, run)

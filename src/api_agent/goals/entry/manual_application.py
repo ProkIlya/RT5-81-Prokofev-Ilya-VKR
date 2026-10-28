@@ -9,9 +9,10 @@ from api_agent.goals.entry.application_context import ApplicationContext
 from api_agent.goals.checks.compiler import AcceptedGoal
 from api_agent.goals.checks.selected_compile import compile_selected
 from api_agent.goals.checks.selected_workflow import SelectedWorkflow
+from api_agent.goals.entry.continuation import ContinuationApplication
 
 
-class ManualApplication(ApplicationContext):
+class ManualApplication(ContinuationApplication, ApplicationContext):
     def __init__(self, catalog, config, *, history, workspace, human=None, limits=None,
                  mappings=None, token_counter=None, current_config=None, trace_sink=None,
                  event_sink=None, model_test_passwords=None):
@@ -20,11 +21,23 @@ class ManualApplication(ApplicationContext):
             mappings=mappings, current_config=current_config, trace_sink=trace_sink, event_sink=event_sink,
             workspace=workspace, model_test_passwords=model_test_passwords)
 
+    def attachment_status(self, descriptor):
+        """Применимость отдельно от неизменного исторического отчёта."""
+        from api_agent.storage.reuse import attachment_status, actor_identity
+        return attachment_status(self.history, self.config.snapshot['project_id'],
+                                 descriptor, self.catalog, self.config, actor_identity(self.mappings))
+
     def _configuration(self, document):
         accepted = compile_selected(self.catalog, self.config, document)
         if self._safe(document) != document: raise ValueError('selected_private_configuration')
         snapshot=accepted.snapshot
-        attachments=[self.history.resolve_attachment(self.config.snapshot['project_id'],item) for item in snapshot['attachments']]
+        attachments=[]
+        for item in snapshot['attachments']:
+            reuse = self.attachment_status(item)
+            if reuse['status'] != 'applicable': raise ValueError('attachment_' + reuse['status'])
+            resolved = self.history.resolve_attachment(self.config.snapshot['project_id'], item)
+            resolved['reuse'] = reuse
+            attachments.append(resolved)
         validate_tree(attachments,max_depth=16,max_bytes=16384)
         for attachment in attachments:
             operation=attachment['origin']['operation_id']
@@ -54,9 +67,13 @@ class ManualApplication(ApplicationContext):
         return {**result, 'preview_hash': fingerprint(result)}
 
     def _workflow(self, accepted, preparation):
-        return SelectedWorkflow(self.catalog, self.config, accepted, human=self.human,
+        workflow = SelectedWorkflow(self.catalog, self.config, accepted, human=self.human,
             preparation=preparation, model_name=self.model_name, current_config=self.current_config,
             **{k: deepcopy(v) for k, v in self.mappings.items() if k in {'auth','extraction','binding_rules','private_bodies'}})
+        workflow.runtime_mapping_hash = fingerprint({k: v for k, v in self.mappings.items() if k != 'health_check'})
+        from api_agent.storage.reuse import actor_identity
+        workflow.actor_identity_hash = actor_identity(self.mappings)
+        return workflow
 
     def start(self, project, session, message, document, model, *, accepted_hash=None, parent_run_id=None):
         if project != self.config.snapshot['project_id']: raise ValueError('selected_foreign_project')

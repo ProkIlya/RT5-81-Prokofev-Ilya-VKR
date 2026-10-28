@@ -32,6 +32,8 @@ class CodeWorkflow(CatalogWorkflow):
 
     def observation(self,session,exchange,validation):
         result=super().observation(session,exchange,validation)
+        from api_agent.execution.auth_feedback import observe_auth
+        observe_auth(self, session, exchange, validation)
         self._authenticated=session.state.principal is not None
         return result
 

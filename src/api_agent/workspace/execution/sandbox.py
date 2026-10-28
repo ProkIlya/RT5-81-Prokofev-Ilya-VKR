@@ -73,7 +73,9 @@ class WorkspaceSandbox:
         return bool(self._docker('container', 'ls', '-a', '--filter', 'name=^/' + self.name + '$', '--format', '{{.ID}}').stdout.strip())
 
     def __enter__(self):
+        self.broker.reserve_active('sandbox', self.broker.limits.max_seconds)
         try:
+            self.broker.event('sandbox_requested')
             info = json.loads(self._docker('image', 'inspect', self.image).stdout)[0]
             if info['Os'] != 'linux' or info['Config'].get('Labels', {}).get('org.api-agent.workspace') != 's09d2-python310-v1':
                 raise WorkspaceError('sandbox_image_required')
@@ -99,11 +101,13 @@ class WorkspaceSandbox:
             ready = self._next(time.monotonic() + 30)
             if ready != {'kind': 'ready', 'artifact_hash': self.broker.artifact.hash}: raise WorkspaceError('worker_start_failed')
             state = self.inspect()
+            self.broker.settle_active('sandbox')
             self.broker.event('sandbox_started', {'image': self.image, 'limits': vars(self.limits),
                 'network': state['HostConfig']['NetworkMode'], 'readonly': state['HostConfig']['ReadonlyRootfs'],
                 'logging': state['HostConfig']['LogConfig']['Type']})
             return self
         except BaseException:
+            self.broker.settle_active('sandbox')
             self.close()
             raise
 
@@ -151,9 +155,14 @@ class WorkspaceSandbox:
             'code_bytes': len(code.encode()), 'code': {'omitted': 'private_run'} if private else code,
             'state': 'started', 'error': None}
         records.append(record)
-        self.broker.event('code_started', {'code_hmac': record['code_hmac']})
+        self.broker.reserve_active('code', self.limits.seconds)
+        try: self.broker.event('code_started', {'code_hmac': record['code_hmac']})
+        except BaseException:
+            self.broker.settle_active('code')
+            raise
         started = time.monotonic()
-        deadline = min(started + self.limits.seconds, self.broker.session.deadline)
+        deadline = min(started + self.limits.seconds, self.broker.session.deadline,
+                       started + self.broker.remaining_active('code'))
         before = self.broker.session.requests
         sequence, output, error, error_line, error_object_type, variables, truncated = 0, '', None, None, None, [], False
         error_detail, diagnostic_keys = None, public_keys(self.broker.artifact)
@@ -223,6 +232,7 @@ class WorkspaceSandbox:
                 output=output, output_untrusted=True, output_bytes=len(output.encode()), output_truncated=truncated,
                 variables=variables, variable_types=variable_types,
                 wall_seconds=time.monotonic() - started, requests=self.broker.session.requests - before)
+            self.broker.settle_active('code')
             self.broker.event('code_returned', {'error': error, 'progress': progress})
             self.broker.context = {}
         return {'execution_id': execution, 'output': output, 'output_truncated': truncated,

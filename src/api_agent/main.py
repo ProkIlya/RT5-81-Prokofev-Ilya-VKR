@@ -14,6 +14,8 @@ def main(argv=None, *, model=None, token_counter=None, human_reader=None):
     parser.add_argument('goal',nargs='?')
     parser.add_argument('--interface',choices=('code',),default='code')
     parser.add_argument('--manual-config')
+    parser.add_argument('--continue-run')
+    parser.add_argument('--origin-session')
     parser.add_argument('--preview-only',action='store_true')
     parser.add_argument('--accept-preview')
     for name in ('code-sdk','code-sdk-hash','code-image','project-config','runtime-mappings','history-db',
@@ -38,7 +40,7 @@ def main(argv=None, *, model=None, token_counter=None, human_reader=None):
         directory=Path(args.evidence_dir);directory.mkdir(parents=True,exist_ok=True)
         def sink(run):
             (directory/(run['run_id']+'.json')).write_text(json.dumps(run,ensure_ascii=False,indent=2),encoding='utf-8')
-        if args.manual_config:
+        if args.manual_config or args.continue_run:
             from api_agent.goals.entry.manual_cli import run_manual_cli as run
         else: raise ValueError('selected_manual_config_required')
         return run(args,catalog,directory,sink,model=model,token_counter=token_counter,

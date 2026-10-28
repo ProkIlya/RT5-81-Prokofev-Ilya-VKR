@@ -98,6 +98,23 @@ class RunState:
             raise ValueError("runtime_reference_denied")
         return deepcopy(record["value"])
 
+    def restore_public(self, record, *, origin_run_id):
+        """Host-only импорт уже проверенного source с новой ссылкой; не auth grant."""
+        rule = self.rules.get(record['operation_id'], {}).get(record['path'])
+        kind = record.get('type')
+        expected = {'integer': int, 'string': str, 'boolean': bool}.get(kind)
+        if (not rule or rule.get('secret') or record.get('secret') is not False
+                or rule['type'] != kind or expected is None or type(record.get('value')) is not expected
+                or record.get('value') == '[REDACTED]'):
+            raise ValueError('recovery_source_invalid')
+        if len(self._records) >= 32: raise ValueError('state_limit')
+        fresh = {k: deepcopy(record[k]) for k in ('operation_id', 'exchange_id', 'path', 'type', 'secret', 'value')}
+        if 'occurrence_id' in record: fresh['occurrence_id'] = record['occurrence_id']
+        fresh.update(ref='value-' + uuid.uuid4().hex[:16], origin_run_id=origin_run_id)
+        while fresh['ref'] in self._records: fresh['ref'] = 'value-' + uuid.uuid4().hex[:16]
+        self._records[fresh['ref']] = fresh
+        return self._public_record(fresh)
+
     def public(self):
         """Вернуть независимую безопасную проекцию, не authority dictionary."""
         return [self._public_record(record) for record in self._records.values()]

@@ -10,6 +10,7 @@ from api_agent.bounded_json import validate_tree
 from api_agent.openapi.parser import canonical
 from api_agent.validation import fingerprint, validate_exchange, report
 from api_agent.workspace.sdk import SdkArtifact, BUILDER_VERSION
+from api_agent.storage.common import _key
 
 ERROR_CODES = set(('artifact_denied protocol_denied operation_denied invalid_parameters ambiguous_parameter_name '
     'binding_source_denied auth_reference_denied occurrence_denied occurrence_inputs_changed unexpected_occurrence '
@@ -57,6 +58,7 @@ class WorkspaceBroker:
         self.mutation_rejected = False
         self._lease = None
         self.audit_key = secrets.token_bytes(32)
+        self.active_intervals = {}
 
     def safe(self, value, *, metadata=False):
         if hasattr(self, 'session'):
@@ -100,6 +102,27 @@ class WorkspaceBroker:
             if self.parent_run_id: self.run['parent_run_id'] = self.parent_run_id
             if self.model_metadata is not None: self.run['model'] = deepcopy(self.model_metadata)
             self.session = self.workflow.make_session(snap['target'], self.catalog, self.run, self.limits)
+            self.active_clock = getattr(getattr(self.workflow, 'human', None), 'active_clock', time.monotonic)
+            self.active_started = self.active_clock()
+            self.run['limits'] = vars(self.limits)
+            self.run['runtime_mapping_hash'] = getattr(self.workflow, 'runtime_mapping_hash', None)
+            self.run['actor_identity_hash'] = getattr(self.workflow, 'actor_identity_hash', None)
+            self.run['reset_epoch'] = (self.history._fact_policy(snap['project_id'])['reset_epoch']
+                if self.history.db.execute('SELECT 1 FROM fact_projects WHERE project_key=?',
+                    (_key(snap['project_id']),)).fetchone() else 0)
+            continuation = getattr(self.workflow, 'continuation', None)
+            if continuation:
+                self.run['continuation'] = deepcopy(continuation)
+                self.run['completed_mutations'] = deepcopy(continuation['completed_mutations'])
+                prior = continuation['prior_ledger']
+                self.session.max_requests -= prior['http']
+                self.session.deadline -= prior['active_seconds']
+            from api_agent.workspace.execution.recovered_sources import restore_sources
+            self.recovered_sources = restore_sources(self)
+            if self.workflow.auth:
+                from api_agent.execution.auth_feedback import session_login_context
+                self.run['auth_feedback'] = (deepcopy(continuation['memory']['auth_context']) if continuation
+                    else session_login_context(self.history, snap['project_id'], self.session_id, self.run['runtime_mapping_hash']))
             self.session.cancel = self.cancel
             metadata = self.workflow.storage_metadata() if hasattr(self.workflow, 'storage_metadata') else self.workflow.runtime_manifest()
             if (self.safe_run() != self.run or self.safe(metadata, metadata=True) != metadata
@@ -127,6 +150,8 @@ class WorkspaceBroker:
 
     def checkpoint(self):
         self.run['requests'] = self.session.requests
+        from api_agent.storage.checkpoints import build_checkpoint
+        self.run['checkpoint'] = build_checkpoint(self)
         snapshot = self.safe_run()
         self.history.save_snapshot(snapshot)
         if self.trace_sink:
@@ -135,9 +160,23 @@ class WorkspaceBroker:
                 self.stopped = self.stopped or 'trace_error'
                 raise WorkspaceError('trace_error') from None
 
+    def reserve_active(self, kind, seconds):
+        """Перед durable boundary резервировать bounded незавершённый интервал."""
+        elapsed = max(0.0, self.active_clock() - self.active_started)
+        prior = (self.run.get('continuation') or {}).get('prior_ledger', {}).get('active_seconds', 0.0)
+        self.active_intervals[kind] = min(elapsed + seconds, self.limits.max_seconds - prior)
+
+    def settle_active(self, kind):
+        self.active_intervals.pop(kind, None)
+
+    def remaining_active(self, kind):
+        if kind not in self.active_intervals: return self.session.deadline - time.monotonic()
+        return self.active_intervals[kind] - max(0.0, self.active_clock() - self.active_started)
+
     def event(self, kind, details=None):
         event = {'run_id': self.run['run_id'], 'sequence': len(self.run['events']) + 1,
             'kind': kind, 'details': self.safe({**self.context, **(details or {})})}
+        previous_checkpoint = deepcopy(self.run.get('checkpoint'))
         self.run['events'].append(event)
         # Одна durable транзакция вместо двух commit; trace failure откатывает обе записи.
         try:
@@ -145,6 +184,9 @@ class WorkspaceBroker:
                 self.history.append_event(event)
                 self.checkpoint()
         except Exception:
+            self.run['events'].pop()
+            if previous_checkpoint is None: self.run.pop('checkpoint', None)
+            else: self.run['checkpoint'] = previous_checkpoint
             self.stopped = self.stopped or 'storage_error'
             raise WorkspaceError(self.stopped) from None
         if self.event_sink:
@@ -236,13 +278,13 @@ class WorkspaceBroker:
                 and r['path'] == rule['source_path'] and ('source_occurrence' not in rule or r.get('occurrence_id') == rule['source_occurrence'])
                 and key in supplied and canonical(r['value']) == canonical(supplied[key])]
             if len(refs) != 1: raise WorkspaceError('binding_source_denied')
-            source = next((e for e in self.session.exchanges if e['id'] == refs[0]['exchange_id']), None)
-            checked = next((v for v in self.run['validations'] if v['exchange_id'] == refs[0]['exchange_id']), {})
+            from api_agent.workspace.execution.recovered_sources import binding_source
+            source, checked, historical = binding_source(self, refs[0])
             principal = source.get('request_principal', {}) if source else {}
             from api_agent.validation.selection_scope import applicable
             if (source is None or source['outcome'] != 'received' or checked.get('contract_verdict') != 'pass'
                 or checked.get('intent_verdict') != 'pass' or not checked.get('task_postcondition') or not applicable(checked)
-                or (principal.get('mode') == 'authenticated' and (principal.get('auth_epoch') != self.session.state.auth_epoch
+                or (principal.get('mode') == 'authenticated' and ((not historical and principal.get('auth_epoch') != self.session.state.auth_epoch)
                     or principal.get('actor') != self.session.state.principal))):
                 raise WorkspaceError('binding_source_denied')
             args.setdefault('bindings', {})[key] = refs[0]['ref']
@@ -257,22 +299,70 @@ class WorkspaceBroker:
             args['credential_ref'] = refs[0]['ref']
         mutation = op['method'] not in {'GET', 'HEAD', 'OPTIONS'}
         if mutation and self.mutation_rejected: raise WorkspaceError('approval_rejected')
-        if mutation and self.history.unresolved_mutations(self.run['project_id'], exclude_run_id=self.run['run_id']):
-            raise WorkspaceError('unresolved_uncertain_write')
-        self.session.admit(args)
-        if mutation: self.run['pending_mutation'] = {'operation_id': name, 'request_index': self.session.requests + 1}
-        self.event('http_prepared', {'operation_id': name, 'operation_hash': self.catalog.operation_hashes[name],
-            'occurrence_id': args.get('occurrence_id'), 'request_index': self.session.requests + 1})
-        self.guard()
-        exchange = self.session.execute(args)
-        if mutation and not self.session.uncertain: self.run.pop('pending_mutation', None)
+        if mutation:
+            unresolved = self.history.unresolved_mutations(self.run['project_id'], exclude_run_id=self.run['run_id'])
+            from api_agent.execution.auth_feedback import recovery_login_allowed
+            if unresolved and not recovery_login_allowed(self.workflow, self.history, self.run['project_id'], unresolved, name):
+                raise WorkspaceError('unresolved_uncertain_write')
+        prepared = self.session.admit(args)
+        from api_agent.storage.checkpoints import mutation_key
+        # Используется actual prepared body после private input; сохраняется только digest.
+        import json
+        actual_body = json.loads(prepared[3]) if prepared[3] is not None else None
+        actual_parameters = self.safe(self.session._request_parameters)
+        signature = mutation_key(name, actual_parameters, self.safe(actual_body))
+        auth_operation = name in {(self.workflow.auth or {}).get('login_operation'),
+                                 *(self.workflow.auth or {}).get('logout_operations', [])}
+        if mutation and not auth_operation and any(item['key'] == signature for item in self.run.get('completed_mutations', [])):
+            raise WorkspaceError('duplicate_semantic_action')
+        if mutation:
+            self.run['pending_mutation'] = {'operation_id': name, 'operation_hash': self.catalog.operation_hashes[name],
+                'request_index': self.session.requests + 1, 'method': op['method'],
+                'parameters': actual_parameters, 'body': self.safe(actual_body), 'request_hash': signature,
+                'principal': self.safe(self.session._request_principal)}
+        self.run['http_attempt_reserved'] = self.session.requests + 1
+        self.reserve_active('http', self.session.timeout)
+        self.session.active_interval_remaining = lambda: self.remaining_active('http')
+        try:
+            self.event('http_prepared', {'operation_id': name, 'operation_hash': self.catalog.operation_hashes[name],
+                'occurrence_id': args.get('occurrence_id'), 'request_index': self.session.requests + 1})
+            try: self.guard()
+            except WorkspaceError:
+                pending = self.run.pop('pending_mutation', None)
+                reserved = self.run.pop('http_attempt_reserved', None)
+                try: self.event('http_aborted_before_dispatch', {'operation_id': name, 'reason': self.stopped})
+                except WorkspaceError:
+                    if pending is not None: self.run['pending_mutation'] = pending
+                    if reserved is not None: self.run['http_attempt_reserved'] = reserved
+                    raise
+                raise
+            exchange = self.session.execute(args)
+        finally:
+            self.session.active_interval_remaining = None
+            self.settle_active('http')
+        self.run.pop('http_attempt_reserved', None)
         validation = validate_exchange(self.catalog, exchange, self.prepared[self.workflow.prepared_key(args)])
         self.run['exchanges'].append(self.safe(exchange))
         self.run['validations'].append(self.safe(validation))
         self.run['validation'] = self.safe(validation)
+        status = (exchange.get('response') or {}).get('status')
+        if (mutation and not auth_operation and exchange['outcome'] in {'received', 'invalid_json', 'invalid_content_type'}
+                and type(status) is int and 200 <= status < 300):
+            self.run.setdefault('completed_mutations', []).append({'key': signature, 'run_id': self.run['run_id'], 'exchange_id': exchange['id']})
         self.workflow.observation(self.session, exchange, validation)
-        self.event('http_completed', {'operation_id': name, 'exchange_id': exchange['id'],
-            'request_index': self.session.requests, 'outcome': exchange['outcome'], 'validation_hash': fingerprint(self.safe(validation))})
+        from api_agent.storage.reuse import observe_attachments
+        if getattr(self.workflow, 'selected_checks', False):
+            observe_attachments(self.workflow, self.history, self.run, self.safe(exchange), self.safe(validation))
+        pending = self.run.get('pending_mutation')
+        if mutation and not self.session.uncertain: self.run.pop('pending_mutation', None)
+        try:
+            self.event('http_completed', {'operation_id': name, 'exchange_id': exchange['id'],
+                'request_index': self.session.requests, 'outcome': exchange['outcome'], 'validation_hash': fingerprint(self.safe(validation))})
+        except WorkspaceError:
+            if mutation:
+                self.run['pending_mutation'] = pending
+                self.session.uncertain = True
+            raise
         response = exchange.get('response') or {}
         return self.safe({'status': response.get('status'), 'body': deepcopy(response.get('json')),
             'json_valid': response.get('json_valid', False), 'truncated': exchange['truncated'], 'outcome': exchange['outcome']})

@@ -43,10 +43,15 @@ def execution_state(broker, names, types, requests_complete):
             'has_error': bool(has_error),
             **{k: validation[k] for k in ('contract_verdict', 'intent_verdict') if k in validation}})
     private = bool(broker.workflow.secrets())
-    return broker.safe({'auth': authenticated, 'auth_session': {'authenticated': authenticated,
+    result = {'auth': authenticated, 'auth_session': {'authenticated': authenticated,
         'principal': session.principal, 'auth_epoch': session.auth_epoch,
         'account_inputs': {key: auth.get('body', {})[key] for key in auth.get('public_body_fields', [])
             if authenticated and key in auth.get('body', {}) and key.lower() not in PRIVATE_NAMES},
         'role': None}, 'api_calls': calls,
         'workspace_variables': {'names': [] if private else names, 'types': {} if private else types, 'limit': 32},
-        'requests_complete': requests_complete})
+        'requests_complete': requests_complete}
+    if broker.run.get('attachment_observations'):
+        result['attached_data_observations'] = broker.run['attachment_observations']
+    if broker.run.get('auth_feedback'):
+        result['auth_feedback'] = broker.run['auth_feedback']
+    return broker.safe(result)

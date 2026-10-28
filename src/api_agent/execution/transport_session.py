@@ -1,6 +1,7 @@
 """Общий транспорт цепочек: admission, deadline, auth и учёт HTTP."""
 import http.client
 import json
+import re
 import time
 import uuid
 from api_agent.transport.http import loopback_origin, PolicyDenied, reject_json_constant
@@ -30,9 +31,12 @@ class ChainSession:
         self.actions = set()
         self.uncertain = False
         self._headers = {}
+        self.active_interval_remaining = None
 
     def remaining(self):
         value = self.deadline - time.monotonic()
+        if self.active_interval_remaining is not None:
+            value = min(value, self.active_interval_remaining())
         if value <= 0:
             raise PolicyDenied("run_time_limit")
         return value
@@ -59,13 +63,14 @@ class ChainSession:
         if body is not None:
             exchange["request"]["json"] = json.loads(body)
         started = time.monotonic()
+        timeout = min(self.timeout, self.remaining())
         connection = http.client.HTTPConnection(
-            "127.0.0.1", self.port, timeout=min(self.timeout, self.remaining())
+            "127.0.0.1", self.port, timeout=timeout
         )
         try:
             connection.connect()
             with SocketDeadline(
-                connection.sock, min(self.deadline, started + self.timeout)
+                connection.sock, min(self.deadline, started + timeout)
             ) as watchdog:
                 headers = {"Accept": "application/json", **self._headers}
                 if body is not None:
@@ -79,6 +84,9 @@ class ChainSession:
                     "json": None,
                     "json_valid": False,
                 }
+                challenge = response.getheader('WWW-Authenticate', '')
+                auth_error = re.search(r'^Bearer\s+.*?\berror="(invalid_token|insufficient_scope)"', challenge, re.IGNORECASE)
+                if auth_error: exchange['response']['auth_error'] = auth_error.group(1).lower()
                 if 300 <= response.status < 400:
                     exchange["outcome"] = "redirect_denied"
                 else:

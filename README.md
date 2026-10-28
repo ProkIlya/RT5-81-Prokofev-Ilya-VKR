@@ -27,6 +27,8 @@ Research использует `cards: []` и N/A; Testing требует ≥1 в
 
 История читается без модели и API: `python -m api_agent.storage --db history.sqlite3 --view projects`. Для Project/Session доступны `sessions`, `messages`; для Run — `report`, `exchanges`. `--view section --run R --exchange E --section response --pointer /json` открывает сохранённое тело. `--view selection --run R --exchange E --field /id --field /value` возвращает locator для `attachments` новой цели. `--pin --run R --label TEXT` создаёт закладку отчёта. Старые условия/credentials/approvals при этом не переносятся. Подробности: [история](docs/project/project-knowledge.md).
 
+Для прерванной задачи предусмотрены `--continue-run RUN_ID --origin-session SESSION` вместо `--manual-config`. Сначала `--preview-only` показывает восстановленные публичные данные, источники и остатки общих бюджетов; запуск принимает тот же preview hash. Цель/условия/лимиты не редактируются, Python-процесс создаётся заново. В trusted `--runtime-mappings` задаётся `"health_check":{"path":"/health","expected_json":{"ready":true}}`: перед новым Run приложение делает одну проверку того же target. При отказе возвращается preparation feedback без модели/worker. Uncertain write и защита выполненных записей сохраняются. Точный [CLI-контракт S11](docs/engineering/goal-verification.md#11-продолжение-прерванного-run-s11).
+
 ## Проверки и структура
 
 `main.py` в корне запускает `src/api_agent/main.py`; основной цикл — `src/api_agent/agent/runtime.py` (`run_workspace` — вход, `_drive` — цикл ходов). `goals/entry` содержит ручной вход и interaction, `goals/checks` — текущие проверки, `goals/legacy` — pure совместимость старых контрактов. `workspace/context` формирует контекст, `workspace/execution` содержит broker/изоляцию/worker; публичный SDK остаётся в `workspace/sdk.py`. Общий host kernel — `execution`, данные SQL — `storage/sql`. `openapi`, `policy`, `transport`, `validation`, `storage` сохраняют свои границы. Малые прежние chains/catalog/state пакеты объединены по ответственности в execution. Ограничение Python-модуля —500 физических строк.
@@ -41,8 +43,10 @@ python scripts/evaluate_manual_entry.py evidence/S10/<новая-папка-live
 $env:S10_LIVE_EVIDENCE = 'evidence/S10/<новая-папка-live>/summary.json'
 python scripts/check_stage.py S10 good
 python scripts/check_stage.py S10 bad
+python scripts/check_stage.py S11 good
+python scripts/check_stage.py S11 bad
 ```
 
-Полный текущий discover требует реальный Docker и tokenizer; skips не принимаются. Good=0, negative controls=2, preparation error=3; S10 good требует live evidence той же source identity. `evaluate_selected_stand.py <новая-папка>` проверяет два связанных Run на предметном стенде без reset. Список шести действующих scripts и профили — в [карте кода](docs/engineering/source-map.md).
+Полный текущий discover требует реальный Docker и tokenizer; skips не принимаются. Good=0, negative controls=2, preparation error=3; S10 good требует live evidence той же source identity. `evaluate_selected_stand.py <новая-папка>` проверяет два связанных Run на предметном стенде без reset; `evaluate_continuation.py <новая-папка>` — два linked continuation с настоящей локальной моделью. Текущие scripts и профили — в [карте кода](docs/engineering/source-map.md).
 
 Исторические реализации/команды S01–S09 и исследовательские прототипы сохранены в [архивах](docs/archive/README.md). Они исполняются со своей версией source/tests. Текущая очистка и её проверки описаны в [отчёте](docs/reports/S10/runtime-cleanup-2026-10-26.md); статусы и ограничения — только в PROGRESS. TUI относится к S12, полная STAND40×3 — к S15; technical passing не заменяет независимый ACCEPT.

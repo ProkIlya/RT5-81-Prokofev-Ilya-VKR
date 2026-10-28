@@ -132,25 +132,35 @@ def _drive(broker, worker, model, budget, options):
         for check in initial['checks']: check.pop('condition_id', None)
     initial['state'] = execution_state(broker, [], {}, False)
     initial['state'].pop('requests_complete', None)
+    continuation = broker.run.get('continuation')
+    if continuation:
+        initial['recovery'] = deepcopy(continuation['memory'])
+        initial['recovery']['spent'] = continuation['prior_ledger']
+        initial['recovery']['remaining_steps'] = broker.limits.max_steps - continuation['prior_ledger']['steps']
     messages[context_index]['content'] = json.dumps(initial, ensure_ascii=False)
     malformed = empty = 0
     try:
-        for index in range(broker.limits.max_steps):
+        for index in range(broker.limits.max_steps - (continuation or {}).get('prior_ledger', {}).get('steps', 0)):
             broker.guard()
             if worker.no_progress >= worker.limits.max_no_progress_blocks:
                 broker.stop('code_correction_limit'); return
-            if hasattr(model, 'set_deadline'): model.set_deadline(broker.session.deadline)
-            request = payload(messages, options.model_name, broker.limits)
-            if hasattr(model, 'prepare_payload'): request = model.prepare_payload(request)
-            request, measured = compact_payload(request, prefix_count=base_count,
-                memory=lambda:memory_snapshot(broker.workflow, broker.run, broker.session, broker.safe),
-                counter=budget.counter, context_tokens=broker.limits.max_context_tokens)
-            if measured:
-                broker.run.setdefault('context_projections', []).append({**measured,'model_call':index + 1})
-                broker.event('context_projected', measured)
-            validate_tree(request, max_depth=64, max_bytes=broker.limits.max_prompt_bytes)
-            if broker.safe(request) != request: raise WorkspaceError('private_model_context')
-            input_tokens, reserved = budget.reserve(request)
+            broker.reserve_active('preflight', broker.limits.max_seconds)
+            try:
+                broker.event('model_preflight_started')
+                if hasattr(model, 'set_deadline'): model.set_deadline(broker.session.deadline)
+                request = payload(messages, options.model_name, broker.limits)
+                if hasattr(model, 'prepare_payload'): request = model.prepare_payload(request)
+                request, measured = compact_payload(request, prefix_count=base_count,
+                    memory=lambda:memory_snapshot(broker.workflow, broker.run, broker.session, broker.safe),
+                    counter=budget.counter, context_tokens=broker.limits.max_context_tokens)
+                if measured:
+                    broker.run.setdefault('context_projections', []).append({**measured,'model_call':index + 1})
+                    broker.event('context_projected', measured)
+                validate_tree(request, max_depth=64, max_bytes=broker.limits.max_prompt_bytes)
+                if broker.safe(request) != request: raise WorkspaceError('private_model_context')
+                input_tokens, reserved = budget.reserve(request)
+            finally:
+                broker.settle_active('preflight')
             run = broker.run
             run['model_calls'] += 1
             prefix = {'system': messages[0], 'tools': request['tools']}
@@ -161,10 +171,16 @@ def _drive(broker, worker, model, budget, options):
                 'input_tokens_preflight': input_tokens, 'reserved_tokens': reserved}
             run['steps'].append(step)
             run['resources'] = budget.snapshot()
-            broker.event('model_requested', {'step': index + 1, 'interface': 'execute_code'})
-            broker.guard()
+            bounded = hasattr(model, 'set_deadline')
+            broker.reserve_active('model', getattr(model, 'timeout', broker.limits.max_seconds) if bounded else broker.limits.max_seconds)
             try:
-                response = model(deepcopy(request))
+                try:
+                    broker.event('model_requested', {'step': index + 1, 'interface': 'execute_code'})
+                    broker.guard()
+                    if bounded:
+                        model.set_deadline(min(broker.session.deadline, time.monotonic() + broker.remaining_active('model')))
+                    response = model(deepcopy(request))
+                finally: broker.settle_active('model')
             except (ModelError, ModelTimeout) as error:
                 if type(error.timing) is dict:
                     try:
@@ -318,6 +334,9 @@ def run_workspace(workflow, history, options, *, session_id, message_id, model, 
     clock = human.active_clock
     started = clock() - workflow.preparation_active
     budget = workflow.preparation_budget or TokenBudget(limits, token_counter or getattr(model, 'count_tokens', None))
+    if getattr(workflow, 'continuation', None):
+        budget.upper = workflow.continuation['prior_ledger']['tokens']
+        budget.unknown = bool(budget.upper)
     broker = WorkspaceBroker(workflow, history, artifact=options.artifact, session_id=session_id,
         message_id=message_id, limits=limits, cancel=human.cancel, parent_run_id=parent_run_id,
         model_metadata={'name': options.model_name, 'interface': 'execute_code', 'mode': 'llm_code',

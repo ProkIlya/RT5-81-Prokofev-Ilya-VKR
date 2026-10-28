@@ -27,8 +27,13 @@ def _read(path, limit=65536):
 
 def run_manual_cli(args, catalog, directory, sink, *, model, token_counter, cancel, reader=None):
     if not args.project_config: raise ValueError('selected_project_config_required')
-    document=_read(args.manual_config)
-    if args.goal is not None and args.goal != document.get('goal'): raise ValueError('selected_goal_conflict')
+    continuation = args.continue_run
+    if continuation and (args.manual_config or args.goal is not None or args.parent_run_id or
+            any(getattr(args, field) is not None for field in ('max_requests','max_steps','max_seconds','max_tokens_total'))):
+        raise ValueError('continuation_immutable_goal_and_limits')
+    if continuation and not args.origin_session: raise ValueError('continuation_origin_session_required')
+    document=_read(args.manual_config) if not continuation else None
+    if not continuation and args.goal is not None and args.goal != document.get('goal'): raise ValueError('selected_goal_conflict')
     config=ProjectConfig.load(args.project_config,catalog)
     if args.project_id and args.project_id != config.snapshot['project_id']: raise ValueError('selected_foreign_project')
     if args.target != config.snapshot['target']: raise ValueError('selected_target_conflict')
@@ -39,7 +44,7 @@ def run_manual_cli(args, catalog, directory, sink, *, model, token_counter, canc
     if not args.preview_only and not args.code_image: raise ValueError('selected_code_image_required')
     workspace=WorkspaceOptions(artifact,args.code_image or 'sha256:'+'0'*64,model_name=args.model_name)
     mappings=_read(args.runtime_mappings) if args.runtime_mappings else {}
-    if not isinstance(mappings,dict) or set(mappings)-{'auth','extraction','binding_rules','private_bodies','model_test_passwords'}:
+    if not isinstance(mappings,dict) or set(mappings)-{'auth','extraction','binding_rules','private_bodies','model_test_passwords','health_check'}:
         raise ValueError('selected_invalid_mappings')
     def console(request):
         print(json.dumps(request,ensure_ascii=False),file=sys.stderr)
@@ -67,15 +72,26 @@ def run_manual_cli(args, catalog, directory, sink, *, model, token_counter, canc
             ('max_tokens_total','max_tokens_total')) if getattr(args,arg) is not None})
         path=Path(args.history_db) if args.history_db else directory/'history.sqlite3'
         with SQLiteHistory(path) as history:
+            project = config.snapshot['project_id']
+            if continuation:
+                from api_agent.storage.checkpoints import validate_checkpoint
+                original = history.read_run(project, args.origin_session, continuation)
+                limits = CatalogLimits(**validate_checkpoint(history, original)['limits'])
             app=ManualApplication(catalog,config,history=history,workspace=workspace,human=human,
                 mappings=mappings,limits=limits,token_counter=token_counter,trace_sink=sink,
                 model_test_passwords=passwords)
-            preview=app.preview(document,parent_run_id=args.parent_run_id)
+            preview=(app.preview_continuation(project,args.origin_session,continuation) if continuation
+                     else app.preview(document,parent_run_id=args.parent_run_id))
             if args.preview_only:
                 print(json.dumps(preview,ensure_ascii=False));return 0
             print(json.dumps(preview,ensure_ascii=False),file=sys.stderr)
-            result=app.start(config.snapshot['project_id'],args.session_id,args.message_id or str(uuid.uuid4()),
-                document,model or LocalModel(args.llm_target),accepted_hash=args.accept_preview,parent_run_id=args.parent_run_id)
+            if continuation:
+                result=app.continue_run(project,args.origin_session,continuation,session_id=args.session_id,
+                    message_id=args.message_id or str(uuid.uuid4()),model=model or LocalModel(args.llm_target),
+                    accepted_hash=args.accept_preview)
+            else:
+                result=app.start(project,args.session_id,args.message_id or str(uuid.uuid4()),
+                    document,model or LocalModel(args.llm_target),accepted_hash=args.accept_preview,parent_run_id=args.parent_run_id)
             print(json.dumps(result,ensure_ascii=False))
             return 0 if result['status']=='completed' else 2
     finally:human.close()

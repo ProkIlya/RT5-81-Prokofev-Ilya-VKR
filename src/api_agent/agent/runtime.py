@@ -30,6 +30,11 @@ class WorkspaceOptions:
     artifact: SdkArtifact
     image: str
     model_name: str = field(default_factory=configured_goal_model)
+    model_snapshot: bytes | None = None
+
+    @property
+    def snapshot(self):
+        return json.loads(self.model_snapshot) if self.model_snapshot is not None else None
 
     def validate(self, catalog, config):
         if not isinstance(self.artifact, SdkArtifact) or not re.fullmatch(r'sha256:[a-f0-9]{64}', self.image):
@@ -39,6 +44,12 @@ class WorkspaceOptions:
             raise ValueError('goal_workspace_scope_mismatch')
         if not isinstance(self.model_name, str) or not 1 <= len(self.model_name.strip()) <= 200:
             raise ValueError('goal_workspace_model_identity')
+        if self.model_snapshot is not None:
+            if not isinstance(self.model_snapshot, bytes): raise ValueError('goal_model_snapshot')
+            snapshot = self.snapshot
+            validate_tree(snapshot, max_bytes=16384)
+            if snapshot.get('schema_version') != 'model-snapshot-v1' or snapshot.get('model_name') != self.model_name:
+                raise ValueError('goal_model_snapshot')
 
 
 def _decision(response):
@@ -149,6 +160,7 @@ def _drive(broker, worker, model, budget, options):
                 broker.event('model_preflight_started')
                 if hasattr(model, 'set_deadline'): model.set_deadline(broker.session.deadline)
                 request = payload(messages, options.model_name, broker.limits)
+                if options.snapshot is not None: request.update(options.snapshot['sampling'])
                 if hasattr(model, 'prepare_payload'): request = model.prepare_payload(request)
                 request, measured = compact_payload(request, prefix_count=base_count,
                     memory=lambda:memory_snapshot(broker.workflow, broker.run, broker.session, broker.safe),
@@ -340,7 +352,9 @@ def run_workspace(workflow, history, options, *, session_id, message_id, model, 
     broker = WorkspaceBroker(workflow, history, artifact=options.artifact, session_id=session_id,
         message_id=message_id, limits=limits, cancel=human.cancel, parent_run_id=parent_run_id,
         model_metadata={'name': options.model_name, 'interface': 'execute_code', 'mode': 'llm_code',
-            'sampling': {**goal_sampling(options.model_name), 'max_tokens': limits.max_output_tokens}},
+            'sampling': {**(options.snapshot['sampling'] if options.snapshot else goal_sampling(options.model_name)),
+                         'max_tokens': limits.max_output_tokens},
+            **({'snapshot': options.snapshot} if options.snapshot is not None else {})},
         trace_sink=trace_sink, event_sink=event_sink, environment='default')
     try:
         with broker:

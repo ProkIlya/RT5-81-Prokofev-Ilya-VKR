@@ -16,7 +16,8 @@ class SelectedWorkflow(CodeWorkflow):
     selected_checks = True
 
     def __init__(self, catalog, config, accepted, *, human, preparation, model_name=None,
-                 extraction=None, binding_rules=None, auth=None, private_bodies=None, current_config=None):
+                 extraction=None, binding_rules=None, auth=None, private_bodies=None, current_config=None,
+                 public_response_headers=None):
         self.accepted, self.human, self.preparation_budget = accepted, human, None
         self.model_name = model_name or configured_goal_model()
         self.sampling = goal_sampling(self.model_name)
@@ -47,7 +48,8 @@ class SelectedWorkflow(CodeWorkflow):
         CatalogWorkflow.__init__(self, catalog, config, goal=manifest['goal'],
             conditions={name: [] for name in config.snapshot['operations']}, extraction=extraction,
             binding_rules=binding_rules, auth=auth, request_auth=request_auth,
-            approval=self._approve, current_config=current_config, required_operations=required)
+            approval=self._approve, current_config=current_config, required_operations=required,
+            public_response_headers=public_response_headers)
         if not self.allowed: raise ValueError('selected_no_allowed_operations')
         if any(o['operation_id'] not in self.allowed for o in manifest['observations']):
             raise ValueError('selected_operation_not_allowed')

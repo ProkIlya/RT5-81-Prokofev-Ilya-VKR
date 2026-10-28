@@ -32,9 +32,12 @@ def mutation_key(name, parameters, body):
 
 
 def scope_hash(run):
-    return fingerprint({k: run.get(k) for k in ('run_id', 'project_id', 'session_id', 'message_id',
+    scope = {k: run.get(k) for k in ('run_id', 'project_id', 'session_id', 'message_id',
         'goal_hash', 'target', 'spec_hash', 'admission_manifest', 'parent_run_id', 'continuation',
-        'runtime_mapping_hash', 'actor_identity_hash', 'reset_epoch', 'limits')})
+        'runtime_mapping_hash', 'actor_identity_hash', 'reset_epoch', 'limits')}
+    snapshot = (run.get('model') or {}).get('snapshot')
+    if snapshot is not None: scope['model_snapshot'] = snapshot
+    return fingerprint(scope)
 
 
 def reserved_active_seconds(broker, observed):

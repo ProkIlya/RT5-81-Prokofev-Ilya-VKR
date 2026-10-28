@@ -10,6 +10,11 @@ from api_agent.openapi import load_source
 
 
 def main(argv=None, *, model=None, token_counter=None, human_reader=None):
+    arguments=list(sys.argv[1:] if argv is None else argv)
+    if '--tui' in arguments:
+        from api_agent.desktop.__main__ import main as desktop_main
+        arguments.remove('--tui')
+        return desktop_main(arguments)
     parser=argparse.ArgumentParser(description="Run restricted code API agent")
     parser.add_argument('goal',nargs='?')
     parser.add_argument('--interface',choices=('code',),default='code')

@@ -11,6 +11,7 @@ from api_agent.execution.state import RunState
 from api_agent.validation import schema_issues
 
 from api_agent.execution.contracts import RequestLimitExceeded
+from api_agent.execution.http_metadata import request_headers,classified_headers
 
 
 
@@ -67,23 +68,25 @@ class ChainSession:
         connection = http.client.HTTPConnection(
             "127.0.0.1", self.port, timeout=timeout
         )
+        headers=request_headers(self.port,op['method'],body,self._headers)
+        response_headers=None;watchdog=None;raw_content_type=''
         try:
             connection.connect()
             with SocketDeadline(
                 connection.sock, min(self.deadline, started + timeout)
             ) as watchdog:
-                headers = {"Accept": "application/json", **self._headers}
-                if body is not None:
-                    headers["Content-Type"] = "application/json"
                 connection.request(op["method"], path, body=body, headers=headers)
                 response = connection.getresponse()
-                watchdog.check()
+                response_headers=response.getheaders()
+                raw_content_type=response.getheader('Content-Type','')
                 exchange["response"] = {
                     "status": response.status,
-                    "content_type": response.getheader("Content-Type", ""),
+                    "content_type": '',
+                    "content_type_is_json": raw_content_type.split(';')[0].strip().lower()=='application/json',
                     "json": None,
                     "json_valid": False,
                 }
+                watchdog.check()
                 challenge = response.getheader('WWW-Authenticate', '')
                 auth_error = re.search(r'^Bearer\s+.*?\berror="(invalid_token|insufficient_scope)"', challenge, re.IGNORECASE)
                 if auth_error: exchange['response']['auth_error'] = auth_error.group(1).lower()
@@ -121,15 +124,18 @@ class ChainSession:
                             exchange["outcome"] = "received"
                     if (
                         exchange["outcome"] in {"received", "invalid_json"}
-                        and exchange["response"]["content_type"]
+                        and raw_content_type
                         .split(";")[0]
                         .strip()
                         .lower()
                         != "application/json"
                     ):
                         exchange["outcome"] = "invalid_content_type"
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException) as error:
             exchange["outcome"] = "transport_error"
+            exchange['transport_error']=('timeout' if isinstance(error,TimeoutError)
+                or watchdog is not None and watchdog.expired else 'disconnect'
+                if isinstance(error,(http.client.RemoteDisconnected,ConnectionError)) else 'io_error')
         finally:
             connection.close()
             exchange["wall_seconds"] = time.monotonic() - started
@@ -142,6 +148,20 @@ class ChainSession:
                 exchange['effect_status'] = 'uncertain'
             self.exchanges.append(exchange)
         self.state.protect(exchange)
+        def redact(value):
+            value=self.state.redact(value)
+            for secret in sorted(self.workflow.secrets(),key=len,reverse=True):
+                if secret:value=value.replace(secret,'[REDACTED]')
+            return value
+        exchange['request']['headers']=classified_headers(headers.items(),
+            public=[p['name'] for p in op['parameters'] if p['in']=='header'],redact=redact)
+        if response_headers is not None:
+            exchange['response']['headers']=classified_headers(response_headers,
+                public=self.workflow.public_response_headers,redact=redact)
+            # Alias проходит ту же классификацию независимо от omitted в общем списке.
+            alias=classified_headers([('Content-Type',raw_content_type)],redact=redact)
+            exchange['response']['content_type']=alias['items'][0]['value']
+            if alias['truncated']:exchange['response']['content_type_truncated']=True
         self._headers.clear()
         return exchange
 

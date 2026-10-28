@@ -37,8 +37,11 @@ class CatalogWorkflow(CatalogObservations):
         admission_rules=None,
         parameter_namespaces=False,
         required_operations=None,
+        public_response_headers=None,
     ):
         self.catalog, self.config = catalog, config
+        from api_agent.execution.http_metadata import public_response_headers as classify
+        self.public_response_headers=classify([] if public_response_headers is None else public_response_headers)
         self.parameter_namespaces = parameter_namespaces
         self.workflow = self
         self.approval = approval
@@ -243,6 +246,7 @@ class CatalogWorkflow(CatalogObservations):
     def runtime_manifest(self):
         """Только публичные application descriptors, без тела credentials."""
         return deepcopy({**({'parameter_namespaces': True} if self.parameter_namespaces else {}),
+            **({'public_response_headers':sorted(self.public_response_headers)} if self.public_response_headers else {}),
             'request_auth': self.request_auth, 'occurrences': self.occurrences,
             'admission_rules': self.admission_rules, 'binding_rules': self.binding_rules,
             'extraction': self.extraction, 'selection_scopes': self.selection_scopes,

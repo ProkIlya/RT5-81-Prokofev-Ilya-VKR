@@ -1,5 +1,4 @@
-"""Один ограниченный последовательный агент; сеть остаётся в границе S02."""
+"""Общие лимиты code runtime; прежний native entry удалён."""
+from api_agent.execution.contracts import CatalogLimits as Limits
 
-from .runtime import Limits, StartAgentRun
-
-__all__ = ["Limits", "StartAgentRun"]
+__all__=["Limits"]

@@ -4,146 +4,13 @@
 до следующей операции. Refs раскрываются без I/O и с отдельным stack циклов.
 """
 
-from dataclasses import dataclass
-import hashlib
-import json
-import math
 import re
 
-PROFILE_VERSION = "rest-json-v1"
-PARSER_VERSION = "1"
-MAX_BYTES = 262144
-MAX_DEPTH = 32
-MAX_NODES = 20000
-METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
-KINDS = {"schemas", "parameters", "requestBodies", "responses", "securitySchemes"}
-TYPES = {"object", "array", "string", "integer", "number", "boolean"}
+from api_agent.openapi.model import OpenApiError, canonical, pointer_part, pointer_get, Catalog, object_keys, nonempty, sensitive, PROFILE_VERSION, PARSER_VERSION, MAX_BYTES, MAX_DEPTH, MAX_NODES, METHODS, KINDS, TYPES
+from api_agent.openapi.model import _annotation
+from api_agent.openapi.schema import SchemaParser
 
-
-class OpenApiError(ValueError):
-    """Безопасная диагностика: никаких значений, body или exception исходного I/O."""
-
-    def __init__(self, code, pointer=""):
-        self.code, self.pointer = code, pointer
-        super().__init__(f"{code} at {pointer or '/'}")
-
-
-def canonical(value):
-    """Одинаковые декларации имеют одинаковые bytes независимо от порядка keys."""
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-def pointer_part(value):
-    return value.replace("~", "~0").replace("/", "~1")
-
-
-def pointer_get(value, pointer):
-    """Закрытый JSON Pointer: неверные escapes и неканонические индексы запрещены."""
-    if not isinstance(pointer, str) or not pointer.startswith("/"):
-        raise KeyError
-    for part in pointer[1:].split("/"):
-        if re.search(r"~(?![01])", part):
-            raise KeyError
-        part = part.replace("~1", "/").replace("~0", "~")
-        if isinstance(value, list):
-            if not re.fullmatch(r"0|[1-9][0-9]*", part):
-                raise KeyError
-            value = value[int(part)]
-        elif isinstance(value, dict):
-            value = value[part]
-        else:
-            raise KeyError
-    return value
-
-
-@dataclass(frozen=True)
-class Catalog:
-    """Immutable bytes защищают основания истории от изменения выданного dict.
-
-    Это снимок parser, не разрешение исполнения. HTTP policy принимает решение
-    отдельно; наличие операции в каталоге не даёт модели прав на неё.
-    """
-
-    _snapshot: bytes
-    _metadata: bytes = b"{}"
-
-    @property
-    def search_metadata(self):
-        """Недоверенные bounded аннотации: вне validation basis и hashes."""
-        return json.loads(self._metadata)
-
-    @property
-    def snapshot(self):
-        return json.loads(self._snapshot)
-
-    @property
-    def operations(self):
-        return self.snapshot["operations"]
-
-    @property
-    def spec_hash(self):
-        return hashlib.sha256(self._snapshot).hexdigest()
-
-    @property
-    def operation_hashes(self):
-        return {
-            name: hashlib.sha256(canonical(op)).hexdigest()
-            for name, op in self.operations.items()
-        }
-
-    def resolve_basis(self, operation_id, pointer, operation_hash):
-        """Проверить версию и наличие поддержанного основания до создания expectation."""
-        try:
-            if self.operation_hashes[operation_id] != operation_hash:
-                raise KeyError
-            return pointer_get(self.operations[operation_id], pointer)
-        except (KeyError, IndexError, ValueError, TypeError):
-            raise OpenApiError("invalid_basis") from None
-
-
-def object_keys(value, allowed, required, path, code="invalid_document"):
-    """Unknown keys — unsupported; неверная форма — отдельная точная диагностика."""
-    if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
-        raise OpenApiError(code, path)
-    if set(value) - set(allowed):
-        raise OpenApiError("unsupported", path)
-    if set(required) - set(value):
-        raise OpenApiError(code, path)
-    for key in ("description", "summary"):
-        if key in value and not isinstance(value[key], str):
-            raise OpenApiError(code, path)
-
-
-def nonempty(value):
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and not any(ord(c) < 32 or ord(c) == 127 for c in value)
-    )
-
-
-def sensitive(value):
-    """Консервативные имена credentials; произвольные неизвестные secrets не угадываются."""
-    return any(
-        word in re.sub(r"[^a-z0-9]", "", value.lower())
-        for word in (
-            "token",
-            "password",
-            "secret",
-            "credential",
-            "apikey",
-            "authorization",
-        )
-    )
-
-
-class Parser:
+class Parser(SchemaParser):
     """Один документ, ограниченный счётчик и refs только из его components."""
 
     def __init__(self, document):
@@ -151,145 +18,7 @@ class Parser:
         self.nodes = 0
         self.version = document.get("openapi")
         self.components = document.get("components", {})
-
-    def walk(self, value, kind, path, stack=(), depth=0, secret=False):
-        """Проверить boundary до рекурсии; раскрытая ссылка наследует secret scope."""
-        self.nodes += 1
-        if depth > MAX_DEPTH or self.nodes > MAX_NODES:
-            raise OpenApiError("limits", path)
-        if isinstance(value, dict) and "$ref" in value:
-            object_keys(value, {"$ref"}, {"$ref"}, path)
-            ref = value["$ref"]
-            if not isinstance(ref, str):
-                raise OpenApiError("invalid_ref", path)
-            if not ref.startswith("#/"):
-                raise OpenApiError("external_ref", path)
-            # Указатель разрешает ровно declaration нужного типа, не соседний объект.
-            parts = ref[2:].split("/")
-            if len(parts) != 3 or parts[:2] != ["components", kind]:
-                raise OpenApiError("invalid_ref", path)
-            if ref in stack:
-                raise OpenApiError("cyclic_ref", path)
-            try:
-                resolved = pointer_get(self.document, ref[1:])
-            except (KeyError, IndexError, ValueError, TypeError):
-                raise OpenApiError("invalid_ref", path) from None
-            return self.walk(resolved, kind, path, (*stack, ref), depth + 1, secret)
-        handlers = {
-            "schemas": self.schema,
-            "parameters": self.parameter,
-            "requestBodies": self.body,
-            "responses": self.response,
-            "securitySchemes": self.security_scheme,
-        }
-        return handlers[kind](value, path, stack, depth, secret)
-
-    def schema(self, value, path, stack, depth, secret):
-        object_keys(
-            value,
-            {
-                "type",
-                "properties",
-                "required",
-                "additionalProperties",
-                "items",
-                "enum",
-                "nullable",
-                "description",
-            },
-            {"type"},
-            path,
-            "invalid_schema",
-        )
-        typ = value["type"]
-        nullable = False
-        if isinstance(typ, list):
-            if (
-                not self.version.startswith("3.1.")
-                or len(typ) != 2
-                or typ.count("null") != 1
-            ):
-                raise OpenApiError("invalid_schema", path)
-            typ = next(t for t in typ if t != "null")
-            nullable = True
-        if not isinstance(typ, str) or typ not in TYPES:
-            raise OpenApiError("invalid_schema", path)
-        if "nullable" in value:
-            if not self.version.startswith("3.0."):
-                raise OpenApiError("unsupported", path)
-            if type(value["nullable"]) is not bool:
-                raise OpenApiError("invalid_schema", path)
-            nullable = value["nullable"]
-        result = {
-            "type": (
-                [typ, "null"] if nullable and self.version.startswith("3.1.") else typ
-            )
-        }
-        if nullable and self.version.startswith("3.0."):
-            result["nullable"] = True
-        if typ == "object":
-            if "items" in value or "enum" in value:
-                raise OpenApiError("invalid_schema", path)
-            properties = value.get("properties", {})
-            if not isinstance(properties, dict) or not all(
-                nonempty(k) for k in properties
-            ):
-                raise OpenApiError("invalid_schema", path)
-            result["properties"] = {
-                k: self.walk(
-                    v,
-                    "schemas",
-                    path + "/properties/" + pointer_part(k),
-                    stack,
-                    depth + 1,
-                    secret or sensitive(k),
-                )
-                for k, v in properties.items()
-            }
-            required = value.get("required", [])
-            if (
-                not isinstance(required, list)
-                or not all(isinstance(k, str) for k in required)
-                or len(set(required)) != len(required)
-                or not set(required) <= set(properties)
-            ):
-                raise OpenApiError("invalid_schema", path)
-            if required:
-                result["required"] = sorted(required)
-            additional = value.get("additionalProperties", True)
-            if type(additional) is not bool:
-                raise OpenApiError("unsupported", path)
-            result["additionalProperties"] = additional
-        elif typ == "array":
-            if "items" not in value or set(value) & {
-                "properties",
-                "required",
-                "additionalProperties",
-                "enum",
-            }:
-                raise OpenApiError("invalid_schema", path)
-            result["items"] = self.walk(
-                value["items"], "schemas", path + "/items", stack, depth + 1, secret
-            )
-        elif set(value) & {"properties", "required", "additionalProperties", "items"}:
-            raise OpenApiError("invalid_schema", path)
-        if "enum" in value:
-            enum = value["enum"]
-            if secret or not isinstance(enum, list) or not enum:
-                raise OpenApiError("invalid_schema", path)
-            matches = {
-                "string": lambda x: isinstance(x, str),
-                "integer": lambda x: type(x) is int,
-                "number": lambda x: type(x) in (int, float) and math.isfinite(x),
-                "boolean": lambda x: type(x) is bool,
-            }
-            if not all((x is None and nullable) or matches[typ](x) for x in enum):
-                raise OpenApiError("invalid_schema", path)
-            encoded = [canonical(x) for x in enum]
-            if len(set(encoded)) != len(encoded):
-                raise OpenApiError("invalid_schema", path)
-            result["enum"] = [json.loads(x) for x in sorted(encoded)]
-        return result
+        self.annotations = {}
 
     def parameter(self, value, path, stack, depth, secret):
         object_keys(
@@ -460,6 +189,7 @@ class Parser:
             raise OpenApiError("invalid_operation", "/paths")
         operations = {}
         search_metadata = {}
+        documentation = {}
         templates = set()
         for path, item in paths.items():
             p = "/paths/" + pointer_part(path)
@@ -553,6 +283,15 @@ class Parser:
                 summary = value.get("summary", "")
                 if isinstance(summary, str):
                     search_metadata[name] = {"summary": " ".join(summary.split())[:160]}
+                annotations = {key: val for key, val in self.annotations.items()
+                    if key.startswith(op_path + '/') or key.startswith(p + '/parameters/')}
+                for key in ('summary', 'description'):
+                    if key in item: annotations[p + '/' + key] = _annotation(item[key])
+                for key in ('summary', 'description'):
+                    if key in value:
+                        text = value[key]
+                        annotations[op_path + '/' + key] = _annotation(text)
+                documentation[name] = annotations
                 if len(operations) > 128:
                     raise OpenApiError("limits", "/paths")
         return Catalog(
@@ -565,6 +304,7 @@ class Parser:
                 }
             ),
             canonical(search_metadata),
+            canonical(documentation),
         )
 
 

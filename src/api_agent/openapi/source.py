@@ -12,8 +12,8 @@ from pathlib import Path
 import re
 import time
 from urllib.parse import urlsplit
-from ..socket_deadline import SocketDeadline
-from .parser import MAX_BYTES, OpenApiError, parse_document
+from api_agent.transport.socket_deadline import SocketDeadline
+from api_agent.openapi.parser import MAX_BYTES, OpenApiError, parse_document
 
 
 def unique_pairs(pairs):

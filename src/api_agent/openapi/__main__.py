@@ -3,7 +3,7 @@
 import argparse
 import json
 import sys
-from . import OpenApiError, load_source
+from api_agent.openapi import OpenApiError, load_source
 
 
 def main():

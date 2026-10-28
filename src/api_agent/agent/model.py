@@ -6,12 +6,34 @@ socket I/O; после ответа loop повторно проверяет о�
 
 import http.client
 import json
+import os
 import time
 from copy import deepcopy
-from ..first_http import loopback_origin
-from ..socket_deadline import SocketDeadline
-from .streaming import collect_stream
-from ..bounded_json import validate_tree, numeric_metadata
+from api_agent.transport.http import loopback_origin
+from api_agent.transport.socket_deadline import SocketDeadline
+from api_agent.agent.streaming import collect_stream
+from api_agent.bounded_json import validate_tree, numeric_metadata
+
+
+def configured_goal_model():
+    """Явная конфигурация испытания; отсутствие ответа не переключает модель."""
+    return os.environ.get('API_AGENT_MODEL_NAME', 'MiniCPM5-2B-Q4_K_M')
+
+
+def qwen35_4b(model_name=None):
+    """Семейство 4B не привязано к конкретной GGUF-квантизации."""
+    name = model_name or configured_goal_model()
+    return name == 'Qwen3.5-4B' or name.startswith('Qwen3.5-4B-')
+
+
+def goal_sampling(model_name=None):
+    """Профиль основной модели; resource caps задаются отдельно."""
+    if qwen35_4b(model_name):
+        return {'temperature': 0.0, 'top_p': 1.0, 'top_k': 0, 'min_p': 0.0,
+                'presence_penalty': 0.0, 'repeat_penalty': 1.0}
+    return {'temperature': 1.0, 'top_p': 0.95, 'min_p': 0.0}
+
+
 
 
 class ModelError(RuntimeError):
@@ -34,6 +56,7 @@ class ModelTimeout(TimeoutError):
 
 class LocalModel:
     """Адаптер локального llama-server с ограничениями времени и размера SSE."""
+
 
     def __init__(self, base, *, deadline=None, timeout=90):
         self.base, self.port = loopback_origin(base)
@@ -133,6 +156,7 @@ class LocalModel:
                 "tool_choice",
                 "chat_template_kwargs",
                 "parallel_tool_calls",
+                "response_format",
             )
             if key in payload
         }

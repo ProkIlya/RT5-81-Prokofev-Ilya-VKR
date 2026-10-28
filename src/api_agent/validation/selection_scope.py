@@ -1,8 +1,8 @@
 """Область ожидания задаётся командой до HTTP, не выводится из языка цели."""
 from copy import deepcopy
-from ..openapi.parser import canonical
-from . import schema_issues
-from ..bounded_json import validate_tree
+from api_agent.openapi.parser import canonical
+from api_agent.validation import schema_issues
+from api_agent.bounded_json import validate_tree
 
 
 def prepare_scopes(catalog, conditions, supplied):

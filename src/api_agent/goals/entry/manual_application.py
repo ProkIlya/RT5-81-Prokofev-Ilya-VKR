@@ -15,7 +15,8 @@ from api_agent.goals.entry.continuation import ContinuationApplication
 class ManualApplication(ContinuationApplication, ApplicationContext):
     def __init__(self, catalog, config, *, history, workspace, human=None, limits=None,
                  mappings=None, token_counter=None, current_config=None, trace_sink=None,
-                 event_sink=None, model_test_passwords=None):
+                 event_sink=None, model_test_passwords=None, source='user_import'):
+        self.configuration_source = source
         super().__init__(catalog, config, history=history,
             human=human, limits=limits or CatalogLimits(), token_counter=token_counter,
             mappings=mappings, current_config=current_config, trace_sink=trace_sink, event_sink=event_sink,
@@ -28,7 +29,7 @@ class ManualApplication(ContinuationApplication, ApplicationContext):
                                  descriptor, self.catalog, self.config, actor_identity(self.mappings))
 
     def _configuration(self, document):
-        accepted = compile_selected(self.catalog, self.config, document)
+        accepted = compile_selected(self.catalog, self.config, document, source=self.configuration_source)
         if self._safe(document) != document: raise ValueError('selected_private_configuration')
         snapshot=accepted.snapshot
         attachments=[]
@@ -62,6 +63,7 @@ class ManualApplication(ContinuationApplication, ApplicationContext):
         result = {'configuration': accepted.snapshot, 'limits': vars(self.limits),
             'policy': deepcopy(self.config.snapshot), 'sdk_hash': self.workspace.artifact.hash,
             'runtime_mapping_hash': fingerprint(self.mappings),'parent_run_id':parent_run_id}
+        if self.workspace.snapshot is not None: result['model'] = self.workspace.snapshot
         # Feasibility/configuration validation выполняется до принятия и HTTP.
         self._workflow(accepted, {})
         return {**result, 'preview_hash': fingerprint(result)}
@@ -69,7 +71,7 @@ class ManualApplication(ContinuationApplication, ApplicationContext):
     def _workflow(self, accepted, preparation):
         workflow = SelectedWorkflow(self.catalog, self.config, accepted, human=self.human,
             preparation=preparation, model_name=self.model_name, current_config=self.current_config,
-            **{k: deepcopy(v) for k, v in self.mappings.items() if k in {'auth','extraction','binding_rules','private_bodies'}})
+            **{k: deepcopy(v) for k, v in self.mappings.items() if k in {'auth','extraction','binding_rules','private_bodies','public_response_headers'}})
         workflow.runtime_mapping_hash = fingerprint({k: v for k, v in self.mappings.items() if k != 'health_check'})
         from api_agent.storage.reuse import actor_identity
         workflow.actor_identity_hash = actor_identity(self.mappings)

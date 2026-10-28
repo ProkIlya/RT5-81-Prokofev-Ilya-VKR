@@ -7,7 +7,7 @@ from api_agent.validation.common import fingerprint, display_value
 from api_agent.validation.schema import schema_issues
 
 def validate_exchange(catalog, exchange, expectations):
-    """Проверить ответ до redaction и вернуть независимые contract/intent.
+    """Проверить host-факты ответа и вернуть независимые contract/intent.
 
     Полное невалидное JSON — контрактный результат. Неполное/слишком большое
     тело и инфраструктурный отказ не дают права диагностировать отсутствующие
@@ -17,10 +17,16 @@ def validate_exchange(catalog, exchange, expectations):
     outcome, response = exchange["outcome"], exchange["response"]
     complete = outcome in {"received", "invalid_json", "invalid_content_type"}
     issues = []
+    content_type_is_json=False
     contract = "not_checked"
     op = catalog.operations[operation_id]
     schema_path = None
     if complete:
+        media=response.get('content_type','').split(';')[0].strip().lower()
+        # Этот bool вычисляет transport из raw header, не JSON сервера/модель.
+        # Legacy exchange без флага сохраняет прежнюю проверку публичного MIME.
+        content_type_is_json=response.get('content_type_is_json')
+        if type(content_type_is_json) is not bool:content_type_is_json=media=='application/json'
         status = response["status"]
         declared = op["responses"].get(str(status), op["responses"].get("default"))
         if declared is None:
@@ -37,15 +43,14 @@ def validate_exchange(catalog, exchange, expectations):
             response_key = str(status) if str(status) in op["responses"] else "default"
             content = declared.get("content")
             if content:
-                media = response["content_type"].split(";")[0].strip().lower()
-                if media != "application/json":
+                if not content_type_is_json:
                     issues.append(
                         {
                             "code": "content_type",
                             "path": "/content_type",
                             "schema_path": "/responses/" + response_key + "/content",
                             "expected": "application/json",
-                            "actual": media,
+                            "actual": response['content_type'] if media=='[redacted]' else media,
                         }
                     )
                 if not response.get("json_valid", outcome == "received"):
@@ -91,10 +96,7 @@ def validate_exchange(catalog, exchange, expectations):
             if predicate == "status_in":
                 observed = response["status"] in params["values"]
             elif predicate == "content_type_is_json":
-                observed = (
-                    response["content_type"].split(";")[0].strip().lower()
-                    == "application/json"
-                )
+                observed = content_type_is_json
             elif predicate == "json_valid":
                 observed = response.get("json_valid", outcome == "received")
             elif predicate == "required_fields_present":

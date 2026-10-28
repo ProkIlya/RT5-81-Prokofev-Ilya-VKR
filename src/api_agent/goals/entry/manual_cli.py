@@ -44,7 +44,7 @@ def run_manual_cli(args, catalog, directory, sink, *, model, token_counter, canc
     if not args.preview_only and not args.code_image: raise ValueError('selected_code_image_required')
     workspace=WorkspaceOptions(artifact,args.code_image or 'sha256:'+'0'*64,model_name=args.model_name)
     mappings=_read(args.runtime_mappings) if args.runtime_mappings else {}
-    if not isinstance(mappings,dict) or set(mappings)-{'auth','extraction','binding_rules','private_bodies','model_test_passwords','health_check'}:
+    if not isinstance(mappings,dict) or set(mappings)-{'auth','extraction','binding_rules','private_bodies','model_test_passwords','health_check','public_response_headers'}:
         raise ValueError('selected_invalid_mappings')
     def console(request):
         print(json.dumps(request,ensure_ascii=False),file=sys.stderr)

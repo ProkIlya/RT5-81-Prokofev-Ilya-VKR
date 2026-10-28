@@ -97,7 +97,8 @@ class ResultHistory:
         result=[{'exchange_id':e['id'],'sequence':offset+i+1,'operation_id':e['operation_id'],
             'request':{k:(e.get('request') or {}).get(k) for k in ('method','url')},
             'status':(e.get('response') or {}).get('status'),'outcome':e['outcome'],
-            'truncated':bool(e.get('truncated')),'wall_seconds':e.get('wall_seconds')} for i,e in enumerate(events)]
+            'truncated':bool(e.get('truncated')),'wall_seconds':e.get('wall_seconds'),
+            'effect_status':e.get('effect_status'),'transport_error':e.get('transport_error')} for i,e in enumerate(events)]
         return page(result,limit,offset)
 
     def exchange_section(self,project,session,run_id,exchange_id,*,section='response',pointer='',offset=0,limit=16):

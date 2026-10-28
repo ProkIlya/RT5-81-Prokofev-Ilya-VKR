@@ -19,6 +19,15 @@ python -m api_agent.workspace.sdk --help
 python -m api_agent.storage --help
 ```
 
+Терминальный интерфейс S12 (рабочая реализация):
+
+```powershell
+python -m pip install -r requirements.txt
+python main.py --tui --state config/desktop/ui.sqlite3
+```
+
+Нужен терминал с ANSI/VT и Unicode (например Windows Terminal или WezTerm). Обычный вывод с перенаправлением в файл не заменяет интерактивный терминал. Setup предлагает модель/Project; модель задаётся локальным GGUF + поддержанным llama-server либо адресом уже работающего локального сервера. Project требует OpenAPI JSON, target, backend-конфигурацию прав и pinned Docker image. F2 открывает навигацию, F3 переключает инспектор, F5 отправляет цель, Ctrl+Q сохраняет результат и завершает собственный runtime. Точные границы реализации/проверок — в PROGRESS.
+
 Ручная цель задаётся через `--manual-config goal.json`. Нужны `--target`, `--spec`, `--project-config`, `--code-image` с immutable sha256 и `--history-db`. SDK можно построить до запуска и передать через `--code-sdk`/`--code-sdk-hash`. Сначала те же аргументы с `--preview-only` показывают нормализованный снимок и `preview_hash`; запуск требует явного принятия или `--accept-preview HASH` именно этого снимка. Wire и формы полей: [контракт ручного входа](docs/engineering/goal-verification.md#9-wire-ручного-входа-s10).
 
 Research использует `cards: []` и N/A; Testing требует ≥1 включённой карточки. PASS выбранных проверок не завершает свободную цель автоматически. Прикреплённые публичные поля прошлого ответа и пояснения к ним добавляются в контекст только при наличии attachments. Лимиты по умолчанию:20 HTTP,24 шага,180s active,65536 total tokens, context8192/output1024; до8 последовательных блоков без HTTP/finish.

@@ -15,6 +15,11 @@ class ContinuationApplication:
         run = self.history.read_run(project, session, run_id)
         if run['status'] != 'partial': raise ValueError('continuation_not_interrupted')
         checkpoint = validate_checkpoint(self.history, run)
+        original_model = (run.get('model') or {}).get('snapshot')
+        selected_model = self.workspace.snapshot
+        if original_model is not None or selected_model is not None:
+            if original_model is None or selected_model is None or original_model != selected_model:
+                raise ValueError('continuation_model_changed')
         if checkpoint['limits'] != vars(self.limits): raise ValueError('continuation_limits_changed')
         if run['target'] != self.target or run['spec_hash'] != self.catalog.spec_hash:
             raise ValueError('continuation_stale_configuration')
@@ -40,6 +45,7 @@ class ContinuationApplication:
             'memory': memory, 'continuation': continuation,
             'health_configuration_hash': fingerprint(self.mappings.get('health_check')),
             'runtime_mapping_hash': fingerprint(self.mappings)}
+        if original_model is not None: value['model'] = deepcopy(original_model)
         return {**value, 'preview_hash': fingerprint(value)}
 
     def continue_run(self, project, origin_session, run_id, *, session_id, message_id, model, accepted_hash=None):

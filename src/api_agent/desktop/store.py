@@ -32,6 +32,8 @@ class DesktopStore:
                 hash TEXT NOT NULL,PRIMARY KEY(id,revision));
             CREATE TABLE IF NOT EXISTS ui_settings(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
         ''')
+        columns={r[1] for r in self.db.execute('PRAGMA table_info(ui_sessions)')}
+        if 'hidden' not in columns:self.db.execute('ALTER TABLE ui_sessions ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0')
 
     def __enter__(self): return self
     def __exit__(self, *args): self.close()
@@ -64,8 +66,16 @@ class DesktopStore:
                             (project, session, str(label)[:200]))
         return session
 
-    def sessions(self, project):
-        return [dict(r) for r in self.db.execute('SELECT * FROM ui_sessions WHERE project=? ORDER BY rowid', (project,))]
+    def sessions(self, project, *, hidden=False):
+        return [dict(r) for r in self.db.execute('SELECT * FROM ui_sessions WHERE project=? AND hidden=? ORDER BY rowid', (project,int(hidden)))]
+
+    def rename_session(self,project,session,label):
+        if not isinstance(label,str) or not label.strip() or len(label)>200:raise ValueError('Введите название сессии (до 200 символов)')
+        with self.lock:self.db.execute('UPDATE ui_sessions SET label=? WHERE project=? AND id=?',(label.strip(),project,session))
+
+    def hide_session(self,project,session,*,hidden=True):
+        # Удаление из дерева не разрушает immutable Run и источники прикреплений.
+        with self.lock:self.db.execute('UPDATE ui_sessions SET hidden=? WHERE project=? AND id=?',(int(hidden),project,session))
 
     def mark(self, project, session, marker):
         if marker not in {'', 'active', 'input', 'done', 'error'}: raise ValueError('desktop_invalid_marker')

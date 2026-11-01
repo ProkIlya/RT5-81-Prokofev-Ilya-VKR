@@ -53,6 +53,9 @@ class SelectedWorkflow(CodeWorkflow):
         if not self.allowed: raise ValueError('selected_no_allowed_operations')
         if any(o['operation_id'] not in self.allowed for o in manifest['observations']):
             raise ValueError('selected_operation_not_allowed')
+        if any(item.get('private') and item['binding']['operation_id'] not in self.allowed
+                for item in manifest['input_slots']):
+            raise ValueError('selected_operation_not_allowed')
         for observation in manifest['observations']:
             if observation['auth'] == 'current' and not auth: raise ValueError('selected_auth_mapping_required')
 

@@ -5,23 +5,14 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, Select, Static
 
 from api_agent.desktop.constructor_state import typed_literal
+from api_agent.desktop.widgets import PageDialog
+from api_agent.desktop.presentation import error_text
 
 
-class EditorDialog(ModalScreen):
-    DEFAULT_CSS = '''
-    EditorDialog {align: center middle; background: $background 70%;}
-    .editor-shell {width: 100; max-width: 98%; height: 92%; border: round $accent; padding: 1 2; background: $surface;}
-    .editor-body {height: 1fr;}
-    .editor-actions {height: auto; layout: horizontal;}
-    .editor-actions Button {margin-right: 1; min-width: 8;}
-    EditorDialog DataTable {height: 8; margin-bottom: 1;}
-    EditorDialog Input, EditorDialog Select {margin-bottom: 1;}
-    EditorDialog Static {height: auto;}
-    .editor-error {color: $error; height: auto;}
-    '''
+class EditorDialog(PageDialog):
     BINDINGS=[('escape','back','Отмена')]
     def action_back(self):self.dismiss(None)
-    def error(self,value):self.query_one('.editor-error',Static).update(str(value))
+    def error(self,value):self.query_one('.editor-error',Static).update(error_text(value))
 
 
 class FieldPicker(EditorDialog):

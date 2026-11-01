@@ -66,7 +66,7 @@ async def evaluate(root):
                     await pilot.pause();(root/(mode+'-screen.svg')).write_text(app.export_screenshot(),encoding='utf-8')
         finally:controller.shutdown()
     unchanged=before==identities();passing=unchanged and len(verdicts)==2 and all(v['technical'] and v['task']
-        and v['checks']==v['expected_checks'] and v['preview_seen']==(v['mode']=='testing') for v in verdicts)
+        and v['checks']==v['expected_checks'] and v['preview_seen']==False for v in verdicts)
     result={'passing':passing,'source_tests_unchanged':unchanged,'verdicts':verdicts,
         'scope':'Focused real LLM/Textual/Docker/API; not full STAND40 or independent ACCEPT'}
     write(root,'result.json',result);print(json.dumps(result,ensure_ascii=False));return 0 if passing else 1

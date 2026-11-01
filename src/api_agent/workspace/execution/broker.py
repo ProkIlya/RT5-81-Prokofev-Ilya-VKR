@@ -9,7 +9,7 @@ from api_agent.execution.contracts import CatalogLimits
 from api_agent.bounded_json import validate_tree
 from api_agent.openapi.parser import canonical
 from api_agent.validation import fingerprint, validate_exchange, report
-from api_agent.workspace.sdk import SdkArtifact, BUILDER_VERSION
+from api_agent.workspace.sdk import SdkArtifact, BUILDER_VERSION, exported_operation_ids
 from api_agent.storage.common import _key
 
 ERROR_CODES = set(('artifact_denied protocol_denied operation_denied invalid_parameters ambiguous_parameter_name '
@@ -43,7 +43,7 @@ class WorkspaceBroker:
         if not isinstance(artifact, SdkArtifact): raise WorkspaceError('artifact_denied')
         manifest, snapshot = artifact.manifest, self.config.snapshot
         if (manifest.get('config_hash') != fingerprint(snapshot) or manifest.get('spec_hash') != self.catalog.spec_hash
-            or manifest.get('builder_version') != BUILDER_VERSION or set(manifest.get('operations', {})) != set(snapshot['operations'])
+            or manifest.get('builder_version') != BUILDER_VERSION or set(manifest.get('operations', {})) != exported_operation_ids(snapshot)
             or any(op.get('operation_hash') != self.catalog.operation_hashes.get(name) for name, op in manifest['operations'].items())):
             raise WorkspaceError('artifact_denied')
         self.artifact = artifact

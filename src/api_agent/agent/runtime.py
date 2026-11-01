@@ -258,6 +258,13 @@ def _drive(broker, worker, model, budget, options):
             denied = [e['details']['reason'] for e in run['events'][event_offset:] if e['kind'] == 'call_rejected']
             if denied:
                 result['error'] = denied[0]
+            if 'approval_rejected' in denied and getattr(broker.workflow,'selected_checks',False):
+                # Явный отказ — граница текущего пользовательского запуска. Не выдаём
+                # модели новый ход для повторного планирования отклонённой мутации.
+                # Старый broker по-прежнему умеет независимое чтение в legacy-тестах.
+                step['observation']={'error':'approval_rejected','requests_executed':len(run['exchanges'])-before}
+                broker.event('user_action_rejected',{'operation_retry_disabled':True})
+                broker.stop('approval_rejected');return
             checklist = broker.workflow.handle_tool(broker.session, 'check_goal', {})
             if result.get('error') == 'NameError':
                 result['hint'] = 'Define variables before use. Inside Python call the listed api functions; execute_code is an outer tool, not a Python function.'

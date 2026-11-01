@@ -17,6 +17,9 @@ class Submission:
 class SubmissionMixin:
     def prepare_send(self,project,session,draft,origin=None):
         self.action_save()
+        if origin is None:
+            self.pending_goal={'scope':(project,session),'goal':draft.get('goal','')}
+            self.refresh_messages()
         token=Submission((project,session),self.draft_revision,
             fingerprint(self.store.draft(project,session)),fingerprint(self.store.project(project)['configuration']))
         self.pending_submission=token;self.follow_live=True
@@ -58,9 +61,9 @@ class SubmissionMixin:
             if not self.closing:self.set_status('Подготовка отменена: черновик/сессия изменены. Нажмите «Отправить» заново.')
             return
         self.prepared=prepared
-        if prepared.origin or prepared.preview['configuration']['mode']=='testing':
-            self.push_screen(PreviewDialog(prepared.preview),lambda accepted:self.accept_prepared(prepared,accepted,token))
-        else:self.accept_prepared(prepared,True,token)
+        # «Отправить» принимает именно закреплённую редакцию; полная сводка доступна
+        # до отправки. Повторное модальное подтверждение не меняет этот контракт.
+        self.accept_prepared(prepared,True,token)
 
     def accept_prepared(self,prepared,accepted,token):
         if not accepted or not self.submission_current(token):self.close_submission(prepared,token);return
@@ -79,9 +82,33 @@ class SubmissionMixin:
 
     def action_send(self):
         self.action_save()
+        if self.controller.busy or self.preparing or self.launching:
+            if self.controller.active_scope in {None,(self.project,self.session)}:
+                self.controller.cancel();self.set_status('Запрошена остановка; ожидаем сохранения результата')
+            else:self.set_status('В другой сессии выполняется запуск')
+            return
+        candidate=self.resume_candidate()
+        if candidate:
+            self.preparing=True;self.prepare_send(self.project,self.session,{},origin=(self.inspected_scope[1],candidate));return
         if not self.project:self.project_form();return
         if self.closing or self.controller.busy or self.preparing or self.launching:
             self.set_status('Дождитесь завершения текущего Run');return
         if not self.draft.get('model_id'):self.choose_model();return
         if not self.draft.get('goal','').strip():self.set_status('Введите цель');return
         self.preparing=True;self.prepare_send(self.project,self.session,deepcopy(self.draft))
+
+    def resume_candidate(self):
+        if not self.inspected_run or self.inspected_scope!=(self.project,self.session):return None
+        run=self.controller.read_run(*self.inspected_scope,self.inspected_run)
+        if (run.get('status')=='partial' and run.get('stop_reason') not in {'approval_rejected','policy_denied','config_scope_changed'}
+            and self.draft.get('goal','').strip() in {'',run.get('goal','').strip()}):return self.inspected_run
+        return None
+
+    def update_run_button(self):
+        from textual.widgets import Button
+        button=self.query_one('#send',Button)
+        active=self.controller.busy or self.preparing or self.launching
+        button.disabled=bool(active and self.controller.active_scope not in {None,(self.project,self.session)})
+        if active:button.label='■';button.tooltip='Остановить текущий запуск · F5'
+        elif self.resume_candidate():button.label='▶';button.tooltip='Продолжить исходный запуск с его моделью и условиями · F5'
+        else:button.label='↑';button.tooltip='Отправить новую цель · F5'

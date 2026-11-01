@@ -5,6 +5,20 @@ from api_agent.storage.results import page_bounds, page
 
 
 class PinHistory:
+    def saved_reports(self,project,*,limit=20,offset=0):
+        """Все автоматически сохранённые отчёты; закладка больше не условие видимости."""
+        page_bounds(limit,offset)
+        rows=self.db.execute('SELECT r.run_id,s.public_id session_id FROM reports r JOIN sessions s ON s.session_key=r.session_key WHERE r.project_key=? ORDER BY r.rowid DESC LIMIT ? OFFSET ?',
+            (_key(project),limit+1,offset)).fetchall()
+        result=[]
+        for row in rows:
+            report=self.read_report(project,row['session_id'],row['run_id'])
+            run=self.read_run(project,row['session_id'],row['run_id'])
+            manifest=((run.get('admission_manifest') or {}).get('goal_contract') or {}).get('manifest',{})
+            result.append({**{k:report.get(k) for k in ('goal','summary','checks_verdict','conditions','execution_status','stop_reason','time')},
+                'cards':[c for c in manifest.get('cards',[]) if c.get('enabled',True)],
+                'run_id':row['run_id'],'session_id':row['session_id']})
+        return page(result,limit,offset)
     def pin_report(self,project,session,run_id,*,label=''):
         if not isinstance(label,str) or len(label)>200:raise ValueError('pin_invalid_label')
         with self.transaction():

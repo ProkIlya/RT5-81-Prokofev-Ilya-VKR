@@ -15,7 +15,9 @@ sys.path[:0]=[str(ROOT/name) for name in ('src','tests','')]
 MODULES={'S12a':['test_desktop_store','test_desktop_models','test_desktop_model_contract',
     'test_desktop_controller','test_desktop_ui','test_desktop_ui_execution','test_desktop_project_views','test_desktop_launcher',
     'test_desktop_preview','test_desktop_startup','test_desktop_publication',
-    'test_desktop_submission','test_desktop_composer','test_desktop_http','test_http_header_alias','test_module_size'],
+    'test_desktop_submission','test_desktop_composer','test_desktop_http','test_http_header_alias',
+    'test_ui_feedback_repair','test_ui_feedback_pages','test_ui_feedback_edges','test_ui_policy_repair',
+    'test_ui_refusal_runtime','test_ui_run_controls','test_module_size'],
     'S12b':['test_desktop_constructor','test_desktop_constructor_ui','test_desktop_constructor_controls',
         'test_desktop_testing_ui','test_selected_checks','test_selected_numeric_repair','test_module_size']}
 MODULES['S12']=list(dict.fromkeys(MODULES['S12a']+MODULES['S12b']))
@@ -47,6 +49,10 @@ def negative_specs(stage):
         value=dict(value);value.pop('model',None);return scope_hash(value)
     from api_agent.desktop.submission import SubmissionMixin
     from api_agent.desktop.composer import ComposerMixin
+    from api_agent.desktop.app import AgentApp
+    from api_agent.desktop.inspector import JsonInspector
+    from api_agent.desktop.assertion_editor import AssertionEditor
+    from api_agent.desktop.composer import DraftDetails
     from api_agent.execution import transport_session
     classify=transport_session.classified_headers
     def raw_headers(pairs,**kwargs):
@@ -58,14 +64,24 @@ def negative_specs(stage):
         pairs=list(pairs);value=classify(pairs,**kwargs)
         if len(pairs)==1 and pairs[0][0].lower()=='content-type':value['items'][0]['value']=pairs[0][1]
         return value
+    def retain_deleted_edit(self,index):
+        if index is not None:self.editing=index
     controls=[
+        ('api_agent.workspace.sdk','exported_operation_ids',lambda snapshot:set(snapshot['operations']),
+            'test_ui_policy_repair.PolicyRepairTests.test_hidden_and_denied_operations_have_no_worker_metadata_or_preflight_signature'),
+        (AssertionEditor,'edit_row',retain_deleted_edit,
+            'test_ui_feedback_edges.RepairEdgesTests.test_deleting_edited_assertion_cancels_edit_and_allows_adding_again'),
+        (ComposerMixin,'show_draft_details',lambda self:self.push_screen(DraftDetails(self)),
+            'test_ui_run_controls.RunControlsTests.test_one_button_stop_resume_and_user_message_before_completion'),
+        (AgentApp,'ALLOW_SELECT',True,'test_ui_feedback_repair.FeedbackRepairTests.test_native_text_selection_cannot_target_unmounted_static'),
+        (JsonInspector,'reset_exchange',lambda self:None,'test_ui_feedback_repair.FeedbackRepairTests.test_switch_run_clears_previous_http_body_and_attachment_selection'),
         (ModelManager,'prepare',unchecked,'test_desktop_models.DesktopModelTests.test_same_alias_different_gguf_cannot_continue'),
         (ModelManager,'acquire',ignore_expected,'test_desktop_models.DesktopModelTests.test_acquire_rejects_another_prepared_identity'),
         (DesktopStore,'draft',cross_draft,'test_desktop_store.DesktopStoreTests.test_draft_survives_restart_and_never_crosses_session_or_project'),
         (DesktopController,'read_run',cross_history,'test_desktop_controller.DesktopControllerTests.test_reading_saved_report_never_prepares_a_model_or_replays_http'),
         ('api_agent.storage.checkpoints','scope_hash',weak_scope,'test_desktop_model_contract.ModelContractTests.test_checkpoint_scope_binds_model_identity_not_just_goal'),
         (SubmissionMixin,'submission_current',lambda self,token:True,'test_desktop_submission.SubmissionTests.test_goal_edit_during_prepare_does_not_send_old_research'),
-        (ComposerMixin,'refresh_composer',lambda self:None,'test_desktop_composer.ComposerTests.test_restored_research_exposes_attachment_provenance_and_limits_and_can_remove'),
+        (ComposerMixin,'draft_limits',lambda self:{},'test_desktop_composer.ComposerTests.test_restored_research_exposes_attachment_provenance_and_limits_and_can_remove'),
         (transport_session,'classified_headers',raw_headers,'test_desktop_http.HttpMetadataTests.test_classified_headers_survive_restart_without_authority_and_with_bounds'),
         (transport_session,'classified_headers',raw_alias,'test_http_header_alias.HeaderAliasTests.test_bearer_basic_secret_headers_are_closed_in_every_persisted_projection')]
     if stage=='S12a':return controls

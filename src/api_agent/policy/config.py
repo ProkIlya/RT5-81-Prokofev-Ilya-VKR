@@ -43,7 +43,7 @@ class ProjectConfig:
         granted = {}
         for name, risk in operations.items():
             op = catalog.operations.get(name)
-            if op is None or risk not in {"A", "B", "C", "D", "E"}:
+            if op is None or risk not in {"A", "B", "C", "D", "E", "ALLOW", "CONFIRM", "DENY", "HIDE"}:
                 raise ValueError("invalid_operation_grant")
             if risk == "A" and op["method"] not in {"GET", "HEAD"}:
                 raise ValueError("unsafe_read_classification")
@@ -121,6 +121,8 @@ def decision(snapshot, operation_id, operation_hash):
     if grant is None or grant["operation_hash"] != operation_hash:
         return "DENY"
     risk, mode = grant["risk"], snapshot["mode"]
+    if risk in {'DENY','HIDE'}:return 'DENY'
+    if risk in {'ALLOW','CONFIRM'}:return risk
     if risk == "A":
         return "ALLOW"
     if mode == "READ_ONLY":

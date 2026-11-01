@@ -13,6 +13,7 @@ from api_agent.policy.config import ProjectConfig
 
 
 class OperationPicker(EditorDialog):
+    DEFAULT_CSS='''OperationPicker #operation-table {height: 1fr;}'''
     def __init__(self,state):super().__init__();self.state=state
     def compose(self):
         with Vertical(classes='editor-shell'):
@@ -27,7 +28,7 @@ class OperationPicker(EditorDialog):
     def refresh_rows(self):
         table=self.query_one(DataTable);table.clear()
         for row in self.state.operations(search=self.query_one(Input).value,method=self.query_one(Select).value):
-            table.add_row(row['id'],row['method'],row['path'],key=row['id'])
+            table.add_row(row['id'],method_text(row['method']),row['path'],key=row['id'])
     def on_input_changed(self,event):
         if self.is_mounted:self.refresh_rows()
     def on_select_changed(self,event):
@@ -42,7 +43,7 @@ class TransferDialog(EditorDialog):
     def compose(self):
         with Vertical(classes='editor-shell'):
             yield Label('Экспорт условий' if self.export else 'Импорт условий · без запуска')
-            yield TextArea(self.state.export_text() if self.export else '',id='transfer-text',read_only=self.export)
+            yield TextArea(self.state.export_text() if self.export else '',id='transfer-text',read_only=self.export,language='json')
             yield Input(placeholder='Локальный файл UTF-8 (необязательно)',id='transfer-path')
             yield Static('',id='transfer-error',classes='editor-error')
             with Horizontal(classes='editor-actions'):
@@ -70,12 +71,7 @@ class TransferDialog(EditorDialog):
         except (ValueError,OSError) as error:self.error('constructor: '+str(error))
 
 
-def card_summary(card):
-    return '\n'.join([card.get('name') or card['operation_id'],
-        'HTTP '+', '.join(map(str,card['statuses']))+' · '+card.get('selector','last')+' · auth '+card.get('auth','any'),
-        'Фильтры: '+json.dumps(card.get('where',{}),ensure_ascii=False),
-        'Проверки: '+json.dumps(card.get('assertions',[]),ensure_ascii=False),
-        'Негативный допуск: '+json.dumps(card.get('negative'),ensure_ascii=False)])
+from api_agent.desktop.presentation import card_summary, method_text, SELECTORS
 
 
 class ConstructorDialog(EditorDialog):
@@ -83,9 +79,9 @@ class ConstructorDialog(EditorDialog):
         super().__init__(id='constructor');self.state=state;self.readonly=readonly
     def compose(self):
         with Vertical(classes='editor-shell'):
-            yield Label('Сохранённые условия · только чтение' if self.readonly else 'Условия цели')
+            yield Label('Сохранённые условия · только чтение' if self.readonly else 'Условия цели',classes='page-title')
             with VerticalScroll(classes='editor-body'):
-                yield Static('Проверяются выбранные аспекты. Без привязки ID карточки не доказывают один объект; без карточек операций не доказан весь lifecycle.')
+                yield Static('Карточки проверяют выбранные аспекты. Одинаковые карточки могут проверять один HTTP-вызов. Для разных объектов задайте отбор параметров или источник ID.')
                 yield DataTable(id='cards-table',cursor_type='row')
                 yield Static('',id='card-detail',markup=False)
                 if not self.readonly:
@@ -103,7 +99,7 @@ class ConstructorDialog(EditorDialog):
         table=self.query_one(DataTable);table.clear()
         for index,card in enumerate(self.state.cards):
             table.add_row('✓' if card.get('enabled',True) else '—',card.get('name') or card['operation_id'],
-                ','.join(map(str,card['statuses'])),card.get('selector','last'),key=str(index))
+                ','.join(map(str,card['statuses'])),SELECTORS.get(card.get('selector','last'),'последний подходящий'),key=str(index))
         if self.state.cards:self.query_one('#card-detail',Static).update(card_summary(self.state.cards[0]))
         else:self.query_one('#card-detail',Static).update('Набор пуст: Research · проверки не настроены')
     def selected(self):

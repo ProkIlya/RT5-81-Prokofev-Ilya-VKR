@@ -25,6 +25,14 @@ FACADES = {'list_operations', 'search', 'describe', 'check_goal', 'ask_user', 'p
 MISSING = object()
 
 
+def exported_operation_ids(snapshot):
+    """Новые закрытые grants не экспортируют callable/schema в worker.
+
+    Legacy A–E сохраняют прежний artifact и pre-HTTP authority contract.
+    """
+    return {name for name,grant in snapshot['operations'].items() if grant['risk'] not in {'HIDE','DENY'}}
+
+
 def _name(value, prefix, reserved=()):
     if len(value) <= 64 and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', value) and not keyword.iskeyword(value) and value not in reserved and not value.startswith(prefix):
         return value
@@ -75,8 +83,10 @@ def build_sdk(catalog, config):
         if checked.snapshot != snapshot: raise ValueError()
     except (ValueError, KeyError, TypeError): raise ValueError('sdk_stale_or_invalid_config') from None
     operations = {}
-    names = _operation_names(snapshot['operations'])
-    for name in sorted(snapshot['operations']):
+    exported=exported_operation_ids(snapshot)
+    hidden={name for name,grant in snapshot['operations'].items() if grant['risk']=='HIDE'}
+    names = _operation_names(exported)
+    for name in sorted(exported):
         op = catalog.operations[name]
         body = op.get('requestBody', {})
         operations[name] = {'python_name': names[name], 'operation_hash': catalog.operation_hashes[name],
@@ -90,7 +100,7 @@ def build_sdk(catalog, config):
         'profile_version': catalog.snapshot['profile_version'], 'parser_version': catalog.snapshot['parser_version'],
         'spec_hash': catalog.spec_hash, 'config_hash': fingerprint(snapshot), 'config_version': snapshot['version'],
         'project_id': snapshot['project_id'], 'metadata_hash': fingerprint(metadata), 'operations': operations,
-        'exclusions': [{'operation_id': name, 'reason': 'not_granted'} for name in sorted(catalog.operations.keys() - operations.keys())],
+        'exclusions': [{'operation_id': name, 'reason': 'not_granted'} for name in sorted(catalog.operations.keys() - operations.keys() - hidden)],
         'source_hash': hashlib.sha256(_source(operations).encode()).hexdigest()}
     validate_tree(manifest, max_depth=64, max_nodes=100000, max_bytes=4194304)
     return SdkArtifact(canonical(manifest))

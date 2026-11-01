@@ -20,38 +20,62 @@ from api_agent.desktop.inspector import JsonInspector
 from api_agent.desktop.ui_errors import read_feedback
 from api_agent.desktop.submission import SubmissionMixin
 from api_agent.desktop.composer import ComposerMixin
+from api_agent.desktop.conversation import ConversationMixin, InspectorMixin
+from api_agent.desktop.navigation import NavigationMixin, NavigationTree, DEFAULT_WORKER
+from api_agent.desktop.widgets import SplitHandle
+from api_agent.desktop.presentation import error_text
 
 
-class AgentApp(SubmissionMixin,ComposerMixin,App):
+class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,ComposerMixin,App):
+    # Textual8.2.8 native selection может сохранить уже удалённый Static без parent.
+    # Копирование выполняют явные кнопки сообщения, не этот глобальный mouse handler.
+    ALLOW_SELECT=False
     TITLE='API Testing Agent'
+    ENABLE_COMMAND_PALETTE=False
     BINDINGS=[('f2','navigation','Проекты'),('f3','inspector','Инспектор'),('f5','send','Отправить'),
-              ('ctrl+s','save','Сохранить ввод'),('ctrl+q','quit','Выход')]
-    CSS='''
-    Screen {background: #18212b; color: #e0e7ed;}
-    Header, Footer {background: #263544;}
+              ('ctrl+p','command_palette','Команды'),('ctrl+s','save','Сохранить ввод'),('ctrl+q','quit','Выход')]
+    CSS="""
+    Screen {background: $background; color: $text;}
+    Footer {background: $panel;}
     #body {height: 1fr;}
-    #navigation {width: 27; border-right: solid #526b7b; background: #202d39;}
+    #navigation {width: 27; background: $panel;}
     #workspace {width: 1fr;}
-    #toolbar, #controls, #inspect-controls {height: 3;}
-    Button {min-width: 9; width: auto; margin-right: 1;}
-    #session-title {height: 1; color: #9fc9db; padding-left: 1;}
-    #conversation {height: 1fr; min-height: 3;}
-    #conversation ListItem {height: auto; padding: 1; border-bottom: solid #344855;}
+    #app-bar {height: 3; background: $panel;}
+    #app-title {width: 1fr; padding: 1; text-style: bold;}
+    #app-bar Button {min-width: 5;}
+    #controls {height: 3;}
+    Button {min-width: 5; width: auto; border: none; height: 3; margin-right: 1;}
+    * {scrollbar-size: 1 1;}
+    #session-title {height: 1; color: $accent; padding-left: 1;}
+    #conversation {height: 1fr; min-height: 3; background: $background;}
+    #conversation ListItem {height: auto; padding: 0 1; margin: 0 0 1 0; background: $surface;}
+    #conversation .user-message {margin-left: 8; border-right: solid $accent;}
+    #conversation .agent-message {margin-right: 8; border-left: solid $primary;}
     #conversation Static {height: auto;}
-    #goal {height: 5; border: round #668da5;}
-    #status {height: 1; color: #9fc9db;}
-    #draft-summary {height: 2; color: #9fc9db;}
-    #model-picker {width: 1fr; min-width: 12;}
-    #inspector {height: 45%; min-height: 8; border-top: solid #668da5;}
+    #conversation .user-message > Vertical, #conversation .agent-message > Vertical {height: auto;}
+    .message-role {height: 1; text-style: bold; color: $accent;}
+    .message-actions {height: 3;}
+    .message-actions Button {height: 3; color: $text-muted;}
+    .program-result {color: $text-muted; border-top: solid $panel; padding-top: 1;}
+    #goal {height: 5; border: solid $accent;}
+    #status {height: auto; max-height: 3; color: $text-muted;}
+    #status.error {background: $error; color: $text; text-style: bold; padding: 0 1;}
+    #draft-summary {display: none;}
+    #messages-more {height: 1; display: none;}
+    #model-picker {width: 1fr; min-width: 10;}
+    #inspector {height: 45%; min-height: 8;}
+    #inspector-head {height: 3;}
+    #inspector-label {width: 1fr; padding-top: 1;}
     #inspector TabbedContent, #inspector TabPane {height: 1fr; padding: 0;}
-    #exchanges {width: 40%; height: 1fr;}
+    #exchanges {width: 35%; height: 1fr;}
     #json-tree {width: 1fr; height: 1fr;}
-    #configuration {height: 1fr;}
-    .narrow #navigation {display: none;}
+    #configuration {display: none;}
+    #config-summary {height: auto; padding: 1;}
+    .narrow #navigation, .narrow #nav-split {display: none;}
     .narrow.show-navigation #navigation {display: block; width: 24;}
-    .narrow.inspector-full #conversation, .narrow.inspector-full #goal, .narrow.inspector-full #controls, .narrow.inspector-full #draft-summary {display: none;}
+    .narrow.inspector-full #conversation, .narrow.inspector-full #goal, .narrow.inspector-full #controls {display: none;}
     .narrow.inspector-full #inspector {height: 1fr;}
-    '''
+    """
 
     def __init__(self,store,*,controller=None):
         super().__init__();self.store=store;self.events=queue.SimpleQueue()
@@ -63,43 +87,54 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
         self.message_offset=0;self.exchange_offset=0;self.message_data={};self.conditions=[]
         self.selection=None;self.closing=False;self.prepared=None
         self.draft_revision=0;self.pending_submission=None
+        self.pending_goal=None;self.rendered_message_ids=[];self.rendered_scope=None;self.inspected_role=None
+        self.theme=store.setting('theme','textual-dark')
 
     def compose(self)->ComposeResult:
-        yield Header()
+        with Horizontal(id='app-bar'):
+            yield Static(self.TITLE,id='app-title')
+            yield Button('Команды',id='command-menu',tooltip='Команды приложения · Ctrl+P')
+            yield Button('⚙',id='app-settings',tooltip='Настройки приложения')
         with Horizontal(id='body'):
-            yield Tree('Проекты / сессии',id='navigation')
+            yield NavigationTree('Проекты',id='navigation')
+            yield SplitHandle('#navigation',vertical=True,id='nav-split')
             with Vertical(id='workspace'):
-                with Horizontal(id='toolbar'):
-                    yield Button('Проект',id='project-menu');yield Button('Сессия +',id='session-add')
-                    yield Button('Ещё сообщения',id='messages-more');yield Button('Модели',id='models-settings')
-                yield Label('Выберите или добавьте проект',id='session-title')
+                yield Label('Добавьте или выберите проект',id='session-title')
+                yield Button('Показать более ранние сообщения',id='messages-more')
                 yield ListView(id='conversation')
                 with Vertical(id='inspector'):
-                    with Horizontal(id='inspect-controls'):
-                        yield Button('Закрепить',id='pin');yield Button('Копировать условия',id='copy-conditions')
-                        yield Button('Продолжить',id='continue');yield Button('В новую цель',id='reuse-fields')
+                    yield SplitHandle('#inspector',id='inspector-split')
+                    with Horizontal(id='inspector-head'):
+                        yield Label('Инспектор выбранного запуска',id='inspector-label')
+                        yield Button('×',id='inspector-close',tooltip='Закрыть инспектор · F3')
                     with TabbedContent():
                         with TabPane('HTTP',id='trace-tab'):
                             with Horizontal():
                                 yield DataTable(id='exchanges',cursor_type='row')
+                                yield SplitHandle('#exchanges',vertical=True,id='http-split')
                                 yield JsonInspector(id='json-tree')
                         with TabPane('Условия',id='config-tab'):
-                            yield Button('Открыть конструктор · только чтение',id='config-constructor')
+                            from textual.containers import VerticalScroll
+                            with VerticalScroll():
+                                yield Static('',id='config-summary',markup=False)
+                                yield Button('⧉ Условия в JSON',id='copy-conditions')
+                                yield Button('Открыть сохранённые карточки',id='config-constructor')
                             yield TextArea(read_only=True,id='configuration')
                         with TabPane('Проверки',id='report-tab'):
                             yield DataTable(id='conditions',cursor_type='row')
                 yield Static('',id='status',markup=False)
-                yield TextArea(id='goal',placeholder='Опишите цель для разрешённого API…')
-                yield Static('',id='draft-summary',markup=False)
+                yield TextArea(id='goal',placeholder='Опишите цель для выбранного API…')
+                yield Static('',id='draft-summary')
                 with Horizontal(id='controls'):
-                    yield Button('Условия · 0',id='conditions-edit');yield Button('Модель · выбрать',id='model-picker')
-                    yield Button('Сводка',id='draft-details')
-                    yield Button('Отправить',id='send',variant='primary');yield Button('Отмена Run',id='cancel-run')
+                    yield Button('Условия · 0',id='conditions-edit')
+                    yield Button('Модель · выбрать',id='model-picker')
+                    yield Button('Подробнее',id='draft-details')
+                    yield Button('↑',id='send',variant='primary',tooltip='Отправить цель · F5')
         yield Footer()
 
     def on_mount(self):
         self.query_one('#inspector').display=False
-        self.query_one('#exchanges',DataTable).add_columns('№','Метод / путь','HTTP / исход','Время / эффект')
+        self.query_one('#exchanges',DataTable).add_columns('№','Метод','Путь','HTTP','Время / эффект')
         self.query_one('#conditions',DataTable).add_columns('Условие','Ожидалось','Получено','Итог / причина')
         self.restore_sessions();self.refresh_navigation();self.refresh_composer();self.set_interval(0.15,self.poll_events)
         last=self.store.setting('selection')
@@ -125,14 +160,6 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
         inspector=self.query_one('#inspector');inspector.display=not inspector.display
         self.set_class(inspector.display and self.size.width<100,'inspector-full')
 
-    def refresh_navigation(self):
-        tree=self.query_one('#navigation',Tree);tree.clear()
-        for project in self.store.projects():
-            node=tree.root.add(Text(project['label']),expand=True)
-            for session in self.store.sessions(project['id']):
-                marker={'active':'▶','input':'?','done':'●','error':'!'}.get(session['marker'],'')
-                node.add_leaf(Text(session['label']+' '+marker),data=(project['id'],session['id']))
-        tree.root.expand()
 
     def restore_sessions(self):
         for project in self.store.projects():
@@ -151,9 +178,6 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
                         offset+=20
             except (ValueError,OSError,sqlite3.Error) as error:self.set_status('История проекта: '+str(error))
 
-    def on_tree_node_selected(self,event):
-        if event.control.id=='navigation' and event.node.data:
-            self.open_session(*event.node.data)
 
     def action_save(self):
         if self.project and not self.loading_draft:
@@ -176,101 +200,23 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
         self.loading_draft=True;self.query_one('#goal',TextArea).text=self.draft['goal'];self.loading_draft=False
         self.query_one('#session-title',Label).update(self.store.project(project)['label']+' / '+session)
         self.query_one('#inspector').display=False;self.remove_class('inspector-full');self.inspected_run=None
-        self.message_offset=0;self.refresh_messages();self.update_controls()
+        self.message_offset=0;self.selection=None;self.query_one('#json-tree',JsonInspector).reset_exchange();self.refresh_messages();self.update_controls()
 
     def update_controls(self):
         count=sum(bool(c.get('enabled',True)) for c in self.draft.get('cards',[]))
-        self.query_one('#conditions-edit',Button).label='Условия · '+str(count)
+        self.query_one('#conditions-edit',Button).label='Условия · '+str(count)+(' · 📎 '+str(len(self.draft.get('attachments',[]))) if self.draft.get('attachments') else '')
         record=self.store.model(self.draft.get('model_id'),required=False)
         name=record['profile']['name'] if record else 'выбрать'
         button=self.query_one('#model-picker',Button)
         button.label='Модель · '+(name if len(name)<=22 else name[:19]+'…');button.tooltip=name
         self.refresh_composer()
 
-    @read_feedback
-    def refresh_messages(self):
-        view=self.query_one('#conversation',ListView);view.clear();self.message_data={}
-        if not self.project:return
-        page=self.controller.messages(self.project,self.session,offset=self.message_offset)
-        for index,message in enumerate(page['items']):
-            label=('Вы: ' if message['role']=='user' else 'Агент: ')+message['content']
-            if message['role']=='assistant':
-                run=self.controller.read_run(self.project,self.session,message['run_id']);report=run.get('report') or {}
-                label+='\n'+report.get('summary',run.get('stop_reason') or 'Прервано')
-            item=ListItem(Static(label,markup=False),id='message-'+uuid.uuid4().hex)
-            self.message_data[item.id]=message;view.append(item)
-        self.query_one('#messages-more',Button).disabled=not page.get('more',False)
 
-    def on_list_view_selected(self,event):
-        message=self.message_data.get(event.item.id)
-        if message:self.inspect_message(message['run_id'],message['role'])
 
-    @read_feedback
-    def inspect_message(self,run_id,role):
-        scope=(self.project,self.session)
-        run=self.controller.read_run(*scope,run_id)
-        self.follow_live=False;self.inspected_run=run_id;self.inspected_scope=(self.project,self.session)
-        self.exchange_offset=0
-        manifest=(run.get('admission_manifest',{}).get('goal_contract') or {}).get('manifest',{})
-        self.query_one('#configuration',TextArea).text=json.dumps(manifest,ensure_ascii=False,indent=2)
-        self.query_one('#inspector').display=True
-        self.set_class(self.size.width<100,'inspector-full')
-        self.query_one(TabbedContent).active='config-tab' if role=='user' else 'trace-tab'
-        self.refresh_exchanges();self.refresh_report(run)
 
-    def refresh_report(self,run):
-        table=self.query_one('#conditions',DataTable);table.clear()
-        self.conditions=(run.get('report') or {}).get('conditions',[])
-        for index,result in enumerate(self.conditions):
-            table.add_row(result['condition_id'] if 'condition_id' in result else result.get('id',''),
-                json.dumps(result.get('expected'),ensure_ascii=False),json.dumps(result.get('actual'),ensure_ascii=False),
-                result['verdict']+' · '+result.get('reason',''),key=str(index))
 
-    @read_feedback
-    def refresh_exchanges(self,*,preserve=False):
-        if not self.inspected_run:return
-        page=self.controller.exchanges(*self.inspected_scope,self.inspected_run,offset=self.exchange_offset)
-        table=self.query_one('#exchanges',DataTable);cursor=table.cursor_row
-        table.clear()
-        if not preserve:self.selected_exchange=None
-        for row in page['items']:
-            request=row['request'];url=urlsplit(str(request.get('url') or ''))
-            route=url.path+('?' + url.query if url.query else '')
-            table.add_row(str(row['sequence']),str(request.get('method'))+' '+route,
-                str(row.get('status') or row['outcome']),
-                (str(row['wall_seconds'])+' с' if row.get('wall_seconds') is not None else 'н/д')+
-                (' · НЕОПРЕДЕЛЁН' if row.get('effect_status')=='uncertain' else ''),key=row['exchange_id'])
-        if page.get('more'):table.add_row('…','Показать следующие20','','',key='__more__')
-        if preserve and table.row_count:table.move_cursor(row=min(cursor,table.row_count-1),animate=False)
 
-    def on_data_table_row_selected(self,event):
-        key=str(event.row_key.value)
-        if event.control.id=='conditions':
-            ids=self.conditions[int(key)].get('evidence_ids',[])
-            if ids:self.show_exchange(ids[-1]);self.query_one(TabbedContent).active='trace-tab'
-        elif event.control.id=='exchanges':
-            if key=='__more__':self.exchange_offset+=20;self.refresh_exchanges()
-            else:self.show_exchange(key)
 
-    @read_feedback
-    def show_exchange(self,key):
-        run=self.controller.read_run(*self.inspected_scope,self.inspected_run)
-        exchange=next(e for e in run['exchanges'] if e['id']==key)
-        self.selected_exchange=key;self.selection=None
-        self.query_one('#json-tree',JsonInspector).show_exchange(
-            lambda section,path,offset:self.controller.section(*self.inspected_scope,self.inspected_run,key,
-                section=section,pointer=path,offset=offset),field_picker=self.pick_fields,
-            metadata={k:exchange.get(k) for k in ['request_parameters','request_principal','outcome','truncated',
-                'wall_seconds','effect_status','transport_error']})
-
-    def pick_fields(self,paths):
-        if not paths:self.selection=None;return
-        parents={p.rsplit('/',1)[0] for p in paths}
-        if len(parents)!=1:raise ValueError('Выберите поля одного объекта')
-        parent=parents.pop()
-        with self.controller.history(self.project) as history:
-            self.selection=history.select_attachment(*self.inspected_scope,self.inspected_run,self.selected_exchange,
-                object_path=parent,fields=[p[len(parent):] for p in paths])
 
     def show_models(self):self.push_screen(ModelSettings(self.store),self.model_settings_action)
     def model_settings_action(self,result):
@@ -298,7 +244,7 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
             self.call_from_thread(self.set_status,'Загрузка / проверка модели…')
             self.controller.manager.prepare(self.store.model(key),cancel=self.controller.cancel_event)
             self.call_from_thread(self.set_status,'Модель загружена и проверена')
-        except Exception as error:self.call_from_thread(self.set_status,'Модель недоступна: '+str(error))
+        except Exception as error:self.call_from_thread(self.set_status,'Модель недоступна: '+error_text(error))
         finally:self.preparing=False
 
     def choose_model(self):
@@ -308,7 +254,7 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
     def model_selected(self,key):
         if key:self.draft['model_id']=key;self.action_save();self.update_controls()
 
-    def project_form(self):self.push_screen(FormDialog('Добавить Project',PROJECT_FIELDS),self.create_project)
+    def project_form(self):self.push_screen(FormDialog('Добавить проект',PROJECT_FIELDS),self.create_project)
     def create_project(self,values):
         if not values:return
         try:
@@ -319,19 +265,37 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
             if values['policy_path']:policy=ProjectConfig.load(values['policy_path'],catalog)
             else:
                 project=uuid.uuid4().hex
-                policy=ProjectConfig.create(project,values['target'],catalog,mode='READ_ONLY',resettable=False,
-                    operations={k:'A' for k,v in catalog.operations.items() if v['method'] in {'GET','HEAD'}})
+                policy=ProjectConfig.create(project,values['target'],catalog,mode='TEST',resettable=False,
+                    operations=__import__('api_agent.desktop.project_views',fromlist=['preset_operations']).preset_operations(catalog,'DEFAULT'))
                 values['policy_path']=str(self.store.path.parent/(project+'-policy.json'));policy.save(values['policy_path'])
             project=policy.snapshot['project_id'];label=values.pop('label') or project
+            previous=self.store.project(project,required=False)
+            values['image']=(previous['configuration'].get('image') if previous else None) or self.store.setting('worker_image',DEFAULT_WORKER)
             self.store.add_project(project,label,{k:v for k,v in values.items() if v})
-            self.restore_sessions();session=self.store.add_session(project);self.refresh_navigation();self.open_session(project,session)
-        except Exception as error:self.notify(str(error),severity='error')
+            self.restore_sessions();sessions=self.store.sessions(project)
+            session=sessions[0]['id'] if sessions else self.store.add_session(project,label='Новая сессия')
+            self.refresh_navigation();self.open_session(project,session)
+        except Exception as error:self.notify(error_text(error),severity='error')
 
-    def set_status(self,value):self.query_one('#status',Static).update(value)
+    def set_status(self,value):
+        status=self.query_one('#status',Static)
+        translated=error_text(value)
+        is_error=translated!=str(value) and str(value) not in {'finished','cancelled'} or any(w in str(value).lower() for w in ['ошиб','недоступ','не удалось','invalid','error','denied','unavailable'])
+        status.set_class(is_error,'error');status.update(('Ошибка: ' if is_error else '')+translated)
+
+    def copy_to_clipboard(self,text):
+        from api_agent.desktop.clipboard import copy_windows
+        if copy_windows(text):
+            self._clipboard=text
+        else:super().copy_to_clipboard(text)
 
     def on_button_pressed(self,event):
-        key=event.button.id
-        if key=='send':self.action_send()
+        event.stop();key=event.button.id
+        if self.copy_message(key):return
+        if key=='app-settings':self.show_settings()
+        elif key=='command-menu':self.action_command_palette()
+        elif key=='inspector-close':self.action_inspector()
+        elif key=='send':self.action_send()
         elif key=='cancel-run':self.controller.cancel();self.set_status('Запрошена отмена; ожидаем сохранения результата')
         elif key=='models-settings':self.show_models()
         elif key=='model-picker':self.choose_model()
@@ -344,9 +308,10 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
         else:self.inspector_action(key)
 
     def project_menu(self):
-        self.push_screen(ChoiceDialog('Project', [('new','Добавить проект'),('results','Сохранённые результаты'),
+        self.push_screen(ChoiceDialog('Действия проекта', [('new','Добавить проект'),('results','Сохранённые результаты'),
             ('catalog','Каталог операций'),('policy','Политики операций'),('settings','Настройки проекта')]),self.project_action)
 
+    @read_feedback
     def project_action(self,key):
         if key=='new':self.project_form()
         elif key and self.project:
@@ -383,30 +348,30 @@ class AgentApp(SubmissionMixin,ComposerMixin,App):
                 if self.controller.busy and self.controller.active_scope:self.store.mark(*self.controller.active_scope,'active')
             elif kind=='trace':
                 scope=(value['project'],value['session'])
+                if scope==(self.project,self.session):
+                    self.pending_goal=None;self.refresh_messages()
                 if self.inspected_run==value['run_id'] and self.inspected_scope==scope:
                     self.refresh_exchanges(preserve=True)
-                elif value['exchanges'] and self.follow_live and scope==(self.project,self.session):
-                    self.inspect_message(value['run_id'],'assistant');self.follow_live=True
+                elif self.follow_live and scope==(self.project,self.session):
+                    self.inspect_message(value['run_id'],'user');self.query_one(TabbedContent).active='trace-tab';self.follow_live=True
             elif kind=='finished':
-                if (value['project'],value['session'])==(self.project,self.session):self.refresh_messages()
+                if (value['project'],value['session'])==(self.project,self.session):
+                    self.pending_goal=None;self.refresh_messages()
                 if self.inspected_run==value['run_id'] and self.inspected_scope==(value['project'],value['session']):
                     self.finish_inspected()
-                self.set_status('Завершено: '+str(value.get('stop_reason')))
-            elif kind=='error':self.set_status('Остановлено: '+str(value.get('stop_reason')))
+                self.set_status('Завершено: '+error_text(value.get('stop_reason')))
+            elif kind=='error':self.set_status('Ошибка выполнения: '+error_text(value.get('stop_reason')))
             elif kind=='preparation':self.set_status(value['message'])
             elif kind=='event' and self.controller.active_scope==(self.project,self.session):
                 label={'model_preflight_started':'Проверяем контекст и ресурсы',
                     'model_requested':'Модель выбирает действие…','model_received':'Проверяем ответ модели',
                     'model_observed':'Результат действия сохранён'}.get(value.get('kind'))
                 if label:self.set_status(label)
+        self.update_run_button()
         if self.closing and not self.controller.busy and not self.preparing and not self.launching:
             try:self.controller.close();self.exit()
             except ValueError:pass
 
-    @read_feedback
-    def finish_inspected(self):
-        run=self.controller.read_run(*self.inspected_scope,self.inspected_run)
-        self.refresh_exchanges(preserve=True);self.refresh_report(run)
 
     def action_quit(self):
         self.action_save();self.controller.cancel();self.closing=True

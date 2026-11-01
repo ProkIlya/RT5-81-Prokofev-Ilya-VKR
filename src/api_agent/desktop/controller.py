@@ -94,10 +94,32 @@ class DesktopController:
 
     def messages(self, project, session, *, offset=0):
         if not self.history_path(project).exists(): return {'items': [], 'more': False}
-        with self.history(project) as history: return history.list_messages(project, session, limit=20, offset=offset)
+        with self.history(project) as history:
+            scope=history._scope(project,session)
+            total=history.db.execute('SELECT COUNT(*) FROM messages WHERE project_key=? AND session_key=?',scope).fetchone()[0]
+            start=max(0,total-20-offset)
+            value=history.list_messages(project,session,limit=20,offset=start)
+            value['more']=start>0
+            return value
 
     def read_run(self, project, session, run_id):
         with self.history(project) as history: return history.read_run(project, session, run_id)
+
+    def continuation_summary(self,project,session,run_id):
+        """Сводка исходного snapshot/ledger без model prepare, health HTTP или recovery."""
+        from api_agent.storage.checkpoints import validate_checkpoint
+        with self.history(project) as history:
+            run=history.read_run(project,session,run_id)
+            if run.get('status')!='partial':raise ValueError('continuation_not_interrupted')
+            checkpoint=validate_checkpoint(history,run)
+        limits=checkpoint['limits'];spent=checkpoint['ledger']
+        remaining={name:limits[field]-spent[name] for name,field in
+            [('steps','max_steps'),('http','max_requests'),('tokens','max_tokens_total'),('active_seconds','max_seconds')]}
+        return {'parent_run_id':run_id,'goal':run['goal'],
+            'configuration':run['admission_manifest']['goal_contract']['manifest'],
+            'model':(run.get('model') or {}).get('snapshot'),
+            'limits':limits,'spent':spent,'remaining':remaining,
+            'active_time_accounting':checkpoint['active_usage'],'uncertain':checkpoint['uncertain']}
 
     def exchanges(self, project, session, run_id, *, offset=0):
         with self.history(project) as history: return history.exchanges_page(project, session, run_id, limit=20, offset=offset)

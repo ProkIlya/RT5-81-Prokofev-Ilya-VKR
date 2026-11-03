@@ -17,7 +17,9 @@ MODULES={'S12a':['test_desktop_store','test_desktop_models','test_desktop_model_
     'test_desktop_preview','test_desktop_startup','test_desktop_publication',
     'test_desktop_submission','test_desktop_composer','test_desktop_http','test_http_header_alias',
     'test_ui_feedback_repair','test_ui_feedback_pages','test_ui_feedback_edges','test_ui_policy_repair',
-    'test_ui_refusal_runtime','test_ui_run_controls','test_module_size'],
+    'test_ui_refusal_runtime','test_ui_run_controls','test_ui_v2_behavior','test_ui_v2_routes','test_ui_v3_repairs',
+    'test_unverified_finish.UnverifiedFinishTests','test_atomic_run_publication.AtomicPublicationTests',
+    'test_diagnostic_messages','test_module_size'],
     'S12b':['test_desktop_constructor','test_desktop_constructor_ui','test_desktop_constructor_controls',
         'test_desktop_testing_ui','test_selected_checks','test_selected_numeric_repair','test_module_size']}
 MODULES['S12']=list(dict.fromkeys(MODULES['S12a']+MODULES['S12b']))
@@ -36,9 +38,9 @@ def run(names,stream):
 
 
 def negative_specs(stage):
-    from api_agent.desktop.models import ModelManager
-    from api_agent.desktop.store import DesktopStore
-    from api_agent.desktop.controller import DesktopController
+    from api_agent.desktop.state.models import ModelManager
+    from api_agent.desktop.state.store import DesktopStore
+    from api_agent.desktop.application.controller import DesktopController
     from api_agent.storage.checkpoints import scope_hash
     prepare,acquire,draft,read=ModelManager.prepare,ModelManager.acquire,DesktopStore.draft,DesktopController.read_run
     def unchecked(self,record,*,expected=None,**kwargs):return prepare(self,record,expected=None,**kwargs)
@@ -47,12 +49,13 @@ def negative_specs(stage):
     def cross_history(self,project,session,run_id):return read(self,project,'s',run_id)
     def weak_scope(value):
         value=dict(value);value.pop('model',None);return scope_hash(value)
-    from api_agent.desktop.submission import SubmissionMixin
-    from api_agent.desktop.composer import ComposerMixin
-    from api_agent.desktop.app import AgentApp
-    from api_agent.desktop.inspector import JsonInspector
-    from api_agent.desktop.assertion_editor import AssertionEditor
-    from api_agent.desktop.composer import DraftDetails
+    from api_agent.desktop.application.submission import SubmissionMixin
+    from api_agent.desktop.chat.composer import ComposerMixin
+    from api_agent.desktop.application.app import AgentApp
+    from api_agent.desktop.views.inspector import JsonInspector
+    from api_agent.desktop.builder.assertion_editor import AssertionEditor
+    from api_agent.desktop.chat.conversation import MessageItem
+    from api_agent.desktop.chat.composer import DraftDetails
     from api_agent.execution import transport_session
     classify=transport_session.classified_headers
     def raw_headers(pairs,**kwargs):
@@ -66,7 +69,29 @@ def negative_specs(stage):
         return value
     def retain_deleted_edit(self,index):
         if index is not None:self.editing=index
+    from api_agent.agent.runtime import _completed_writes
+    def forget_created_response(broker):
+        values=_completed_writes(broker)
+        for item in values:
+            item.pop('response_body',None);item.pop('response_body_complete',None)
+        return values
+    from api_agent.workspace.execution.broker import WorkspaceBroker
+    def non_atomic_final(broker):
+        broker.checkpoint();broker.run=broker.safe_run();broker.session.run=broker.run
+        broker.history.finalize(broker.run['project_id'],broker.session_id,broker.message_id,broker.run)
     controls=[
+        ('api_agent.desktop.presentation.diagnostic_text','MESSAGES',{},
+            'test_diagnostic_messages.DiagnosticMessagesTests.test_negative_path_message_explains_how_to_fix_selection'),
+        (WorkspaceBroker,'_publish_final',non_atomic_final,
+            'test_atomic_run_publication.AtomicPublicationTests.test_external_reader_never_observes_checkpoint_without_its_report'),
+        ('api_agent.agent.runtime','_completed_writes',forget_created_response,
+            'test_unverified_finish.UnverifiedFinishTests.test_actual_created_id_survives_python_error_and_duplicate_rejection'),
+        ('api_agent.agent.runtime','unsupported_passes',lambda *_:[],
+            'test_unverified_finish.UnverifiedFinishTests.test_fabricated_success_gets_correction_then_real_api'),
+        (MessageItem,'fit_bubble',lambda self:self.query_one('.bubble'),
+            'test_ui_v2_routes.V2RoutesTests.test_retired_message_callbacks_are_safe_and_live_bubble_still_resizes'),
+        ('api_agent.desktop.builder.assertion_editor','example',lambda *_:[],
+            'test_ui_v2_behavior.V2BehaviorTests.test_collection_uses_schema_example_and_never_overwrites_user_json'),
         ('api_agent.workspace.sdk','exported_operation_ids',lambda snapshot:set(snapshot['operations']),
             'test_ui_policy_repair.PolicyRepairTests.test_hidden_and_denied_operations_have_no_worker_metadata_or_preflight_signature'),
         (AssertionEditor,'edit_row',retain_deleted_edit,
@@ -85,8 +110,8 @@ def negative_specs(stage):
         (transport_session,'classified_headers',raw_headers,'test_desktop_http.HttpMetadataTests.test_classified_headers_survive_restart_without_authority_and_with_bounds'),
         (transport_session,'classified_headers',raw_alias,'test_http_header_alias.HeaderAliasTests.test_bearer_basic_secret_headers_are_closed_in_every_persisted_projection')]
     if stage=='S12a':return controls
-    from api_agent.desktop.constructor_state import ConstructorState
-    from api_agent.desktop.constructor import ConstructorDialog
+    from api_agent.desktop.builder.constructor_state import ConstructorState
+    from api_agent.desktop.builder.constructor import ConstructorDialog
     from api_agent.goals.checks import selected_check
     compile_original,init_original,checker=ConstructorState.compiled,ConstructorDialog.__init__,selected_check.check_selected
     def ignore_spec(self,text):self.replace(json.loads(text)['cards'])

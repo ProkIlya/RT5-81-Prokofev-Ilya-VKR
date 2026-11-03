@@ -1,4 +1,5 @@
 """Textual Projects/Sessions/chat. Сеть и выполнение принадлежат controller/Core."""
+from api_agent.desktop.components.controls import Button, Summary as Static
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -10,20 +11,22 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import (Button, DataTable, Footer, Header, Label, ListItem, ListView,
-    Static, TabbedContent, TabPane, TextArea, Tree)
+from textual.widgets import (DataTable, Footer, Header, Label, ListItem, ListView,
+    TabbedContent, TabPane, TextArea, Tree, Collapsible)
 
-from api_agent.desktop.controller import DesktopController
-from api_agent.desktop.dialogs import (ChoiceDialog, FormDialog, HumanDialog, ModelSettings,
+from api_agent.desktop.application.controller import DesktopController
+from api_agent.desktop.views.dialogs import (ChoiceDialog, FormDialog, HumanDialog, ModelSettings,
     MODEL_FIELDS, PROJECT_FIELDS, PreviewDialog)
-from api_agent.desktop.inspector import JsonInspector
-from api_agent.desktop.ui_errors import read_feedback
-from api_agent.desktop.submission import SubmissionMixin
-from api_agent.desktop.composer import ComposerMixin
-from api_agent.desktop.conversation import ConversationMixin, InspectorMixin
-from api_agent.desktop.navigation import NavigationMixin, NavigationTree, DEFAULT_WORKER
-from api_agent.desktop.widgets import SplitHandle
-from api_agent.desktop.presentation import error_text
+from api_agent.desktop.views.inspector import JsonInspector
+from api_agent.desktop.presentation.ui_errors import read_feedback
+from api_agent.desktop.application.submission import SubmissionMixin
+from api_agent.desktop.chat.composer import ComposerMixin
+from api_agent.desktop.chat.conversation import ConversationMixin, InspectorMixin
+from api_agent.desktop.chat.navigation import NavigationMixin, NavigationTree, DEFAULT_WORKER
+from api_agent.desktop.components.widgets import SplitHandle
+from api_agent.desktop.presentation.presentation import error_text
+from api_agent.desktop.components.styles import COMPACT_CSS
+from api_agent.desktop.components.scrollbars import use_thin_scrollbars
 
 
 class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,ComposerMixin,App):
@@ -75,9 +78,10 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
     .narrow.show-navigation #navigation {display: block; width: 24;}
     .narrow.inspector-full #conversation, .narrow.inspector-full #goal, .narrow.inspector-full #controls {display: none;}
     .narrow.inspector-full #inspector {height: 1fr;}
-    """
+    """+COMPACT_CSS
 
     def __init__(self,store,*,controller=None):
+        use_thin_scrollbars()
         super().__init__();self.store=store;self.events=queue.SimpleQueue()
         self.controller=controller or DesktopController(store,notify=lambda k,v:self.events.put((k,v)))
         if controller is not None:self.controller.notify=lambda k,v:self.events.put((k,v))
@@ -94,7 +98,7 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
         with Horizontal(id='app-bar'):
             yield Static(self.TITLE,id='app-title')
             yield Button('Команды',id='command-menu',tooltip='Команды приложения · Ctrl+P')
-            yield Button('⚙',id='app-settings',tooltip='Настройки приложения')
+            yield Button('⚙︎',id='app-settings',tooltip='Настройки приложения')
         with Horizontal(id='body'):
             yield NavigationTree('Проекты',id='navigation')
             yield SplitHandle('#navigation',vertical=True,id='nav-split')
@@ -116,7 +120,8 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
                         with TabPane('Условия',id='config-tab'):
                             from textual.containers import VerticalScroll
                             with VerticalScroll():
-                                yield Static('',id='config-summary',markup=False)
+                                with Collapsible(title='Включённые карточки и условия',collapsed=False):
+                                    yield Static('',id='config-summary',markup=False)
                                 yield Button('⧉ Условия в JSON',id='copy-conditions')
                                 yield Button('Открыть сохранённые карточки',id='config-constructor')
                             yield TextArea(read_only=True,id='configuration')
@@ -198,7 +203,8 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
         self.project,self.session=project,session;self.follow_live=False
         self.store.set_setting('selection',[project,session]);self.draft=self.store.draft(project,session)
         self.loading_draft=True;self.query_one('#goal',TextArea).text=self.draft['goal'];self.loading_draft=False
-        self.query_one('#session-title',Label).update(self.store.project(project)['label']+' / '+session)
+        label=next(s['label'] for s in self.store.sessions(project) if s['id']==session)
+        self.query_one('#session-title',Label).update(self.store.project(project)['label']+' / '+label)
         self.query_one('#inspector').display=False;self.remove_class('inspector-full');self.inspected_run=None
         self.message_offset=0;self.selection=None;self.query_one('#json-tree',JsonInspector).reset_exchange();self.refresh_messages();self.update_controls()
 
@@ -250,7 +256,9 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
     def choose_model(self):
         records=self.store.models()
         if not records:self.show_models();return
-        self.push_screen(ChoiceDialog('Модель новой цели',[(r['id'],r['profile']['name']) for r in records]),self.model_selected)
+        from api_agent.desktop.components.menus import PopupMenu
+        self.push_screen(PopupMenu('Модель новой цели',[(r['id'],r['profile']['name']) for r in records],
+            self.query_one('#model-picker'),selected=self.draft.get('model_id')),self.model_selected)
     def model_selected(self,key):
         if key:self.draft['model_id']=key;self.action_save();self.update_controls()
 
@@ -266,7 +274,7 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
             else:
                 project=uuid.uuid4().hex
                 policy=ProjectConfig.create(project,values['target'],catalog,mode='TEST',resettable=False,
-                    operations=__import__('api_agent.desktop.project_views',fromlist=['preset_operations']).preset_operations(catalog,'DEFAULT'))
+                    operations=__import__('api_agent.desktop.views.project_views',fromlist=['preset_operations']).preset_operations(catalog,'DEFAULT'))
                 values['policy_path']=str(self.store.path.parent/(project+'-policy.json'));policy.save(values['policy_path'])
             project=policy.snapshot['project_id'];label=values.pop('label') or project
             previous=self.store.project(project,required=False)
@@ -284,7 +292,7 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
         status.set_class(is_error,'error');status.update(('Ошибка: ' if is_error else '')+translated)
 
     def copy_to_clipboard(self,text):
-        from api_agent.desktop.clipboard import copy_windows
+        from api_agent.desktop.components.clipboard import copy_windows
         if copy_windows(text):
             self._clipboard=text
         else:super().copy_to_clipboard(text)
@@ -315,22 +323,22 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
     def project_action(self,key):
         if key=='new':self.project_form()
         elif key and self.project:
-            from api_agent.desktop.project_views import open_project_view
+            from api_agent.desktop.views.project_views import open_project_view
             open_project_view(self,key)
 
     def edit_conditions(self):
-        from api_agent.desktop.constructor import open_constructor
+        from api_agent.desktop.builder.constructor import open_constructor
         open_constructor(self)
 
     def inspector_action(self,key):
         if not self.inspected_run:return
         try:
             if key=='config-constructor':
-                from api_agent.desktop.constructor import open_constructor
+                from api_agent.desktop.builder.constructor import open_constructor
                 run=self.controller.read_run(*self.inspected_scope,self.inspected_run)
                 manifest=run['admission_manifest']['goal_contract']['manifest']
                 open_constructor(self,manifest=manifest);return
-            from api_agent.desktop.project_views import inspector_action
+            from api_agent.desktop.views.project_views import inspector_action
             inspector_action(self,key)
         except Exception as error:self.set_status(str(error))
 

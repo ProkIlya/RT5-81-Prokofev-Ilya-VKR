@@ -1,13 +1,17 @@
 """Карточка: ожидания ответа, отрицательный запрос и отбор фактического вызова."""
+from api_agent.desktop.components.controls import Button, Input, Select, Summary as Static
 from copy import deepcopy
 import re
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Checkbox, Collapsible, DataTable, Input, Label, Select, Static
-from api_agent.desktop.constructor_widgets import EditorDialog
-from api_agent.desktop.presentation import assertion_summary, scope_summary, error_text
+from textual.widgets import Checkbox, Collapsible, DataTable, Label
+from api_agent.desktop.builder.constructor_widgets import EditorDialog
+from api_agent.desktop.presentation.presentation import assertion_summary, scope_summary, error_text
 
 
 class CardEditor(EditorDialog):
+    DEFAULT_CSS='''CardEditor #assertions-table {height: 5; max-height: 7;}
+    CardEditor #card-selector, CardEditor #card-auth {max-width: 65;}
+    CardEditor .editor-body {padding-right: 1;}'''
     def __init__(self,state,card):super().__init__();self.state=state;self.card=deepcopy(card)
     def compose(self):
         op=self.state.catalog.operations[self.card['operation_id']]
@@ -33,9 +37,11 @@ class CardEditor(EditorDialog):
                     options=[('Без ограничения авторизации','any'),('Без авторизации','anonymous')]
                     if op['security']:options.append(('Текущая учётная запись','current'))
                     yield Select(options,value=self.card.get('auth','any'),allow_blank=False,id='card-auth')
+                    if not op['security']:yield Static('Публичная операция по OpenAPI: текущая учётная запись для её отбора не требуется.',classes='field-help')
                     yield Static('Проверка успешного входа сама по себе не подтверждает авторизацию другого запроса.',classes='field-help')
-                    yield Button('Параметры и источник значений',id='card-scope')
-                    yield Static(scope_summary(self.card.get('where',{})),id='scope-summary',markup=False)
+                    yield Button('⚙ Параметры и источник значений',id='card-scope',
+                        disabled=not any(self.state.request_fields(self.card['operation_id']).values()))
+                    yield Static(scope_summary(self.card.get('where',{}),self.state.attachments),id='scope-summary',markup=False)
                 yield Static('',classes='editor-error')
             with Horizontal(classes='editor-actions'):
                 yield Button('Сохранить карточку',id='card-save',variant='primary');yield Button('Отмена',id='card-cancel')
@@ -51,11 +57,13 @@ class CardEditor(EditorDialog):
             except ValueError as error:self.query_one('#card-status-error',Static).update(str(error))
     def refresh_assertions(self):
         table=self.query_one(DataTable);table.clear()
-        for index,item in enumerate(self.card.get('assertions',[])):table.add_row(assertion_summary(item),key=str(index))
+        from api_agent.desktop.components.controls import highlighted
+        for index,item in enumerate(self.card.get('assertions',[])):table.add_row(highlighted(assertion_summary(item)),key=str(index))
+        table.styles.height=min(6,max(2,len(self.card.get('assertions',[]))+1))
         negative=self.card.get('negative')
         self.query_one('#negative-summary',Static).update('Намеренно некорректный запрос: '+str(negative['path']) if negative else '')
     def assertion(self,index=None):
-        from api_agent.desktop.assertion_editor import AssertionEditor
+        from api_agent.desktop.builder.assertion_editor import AssertionEditor
         fields=self.state.response_fields(self.card['operation_id'],self.statuses())
         def saved(value):
             if value is None:return
@@ -65,7 +73,11 @@ class CardEditor(EditorDialog):
             self.refresh_assertions()
         self.app.push_screen(AssertionEditor(self.state,fields,assertions=self.card.get('assertions',[]),operation=self.card['operation_id'],statuses=self.statuses(),negative=self.card.get('negative')),saved)
     def scope_saved(self,value):
-        if value is not None:self.card['where']=value;self.query_one('#scope-summary',Static).update(scope_summary(value))
+        if value is not None:self.card['where']=value;self.query_one('#scope-summary',Static).update(scope_summary(value,self.state.attachments))
+    def on_key(self,event):
+        if event.key=='backspace' and isinstance(self.focused,DataTable):
+            self.on_button_pressed(Button.Pressed(self.query_one('#assertion-delete',Button)));event.stop();event.prevent_default()
+        else:super().on_key(event)
     def on_button_pressed(self,event):
         event.stop();key=event.button.id;table=self.query_one(DataTable);index=table.cursor_row
         try:
@@ -73,7 +85,7 @@ class CardEditor(EditorDialog):
             elif key in {'assertion-add','assertion-edit'}:self.assertion(index if key=='assertion-edit' else None)
             elif key=='assertion-delete' and self.card.get('assertions'):self.card['assertions'].pop(index);self.refresh_assertions()
             elif key=='card-scope':
-                from api_agent.desktop.scope_editor import ScopeEditor
+                from api_agent.desktop.builder.scope_editor import ScopeEditor
                 self.app.push_screen(ScopeEditor(self.state,self.card['operation_id'],self.card.get('where',{})),self.scope_saved)
             elif key=='card-save':
                 name=self.query_one('#card-name',Input).value.strip()

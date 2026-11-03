@@ -19,7 +19,7 @@ from api_agent.openapi.model import canonical
 from api_agent.policy.config import ProjectConfig
 from api_agent.storage import SQLiteHistory
 from api_agent.workspace.sdk import build_sdk
-from api_agent.desktop.models import ModelManager
+from api_agent.desktop.state.models import ModelManager
 
 
 class InteractionChannel:

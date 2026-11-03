@@ -2,7 +2,7 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from textual import work
-from api_agent.desktop.dialogs import PreviewDialog
+from api_agent.desktop.views.dialogs import PreviewDialog
 from api_agent.validation import fingerprint
 
 

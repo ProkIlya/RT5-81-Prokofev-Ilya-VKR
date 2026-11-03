@@ -1,12 +1,13 @@
 """Общие controls конструктора: schema picker и явное типизированное значение."""
+from api_agent.desktop.components.controls import Button, Input, Select, Summary as Static
 import json
 from textual.containers import Vertical, VerticalScroll, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, Label, Select, Static
+from textual.widgets import DataTable, Label
 
-from api_agent.desktop.constructor_state import typed_literal
-from api_agent.desktop.widgets import PageDialog
-from api_agent.desktop.presentation import error_text
+from api_agent.desktop.builder.constructor_state import typed_literal
+from api_agent.desktop.components.widgets import PageDialog
+from api_agent.desktop.presentation.presentation import error_text
 
 
 class EditorDialog(PageDialog):
@@ -65,7 +66,7 @@ class LiteralDialog(EditorDialog):
         event.stop();key=event.button.id
         if key=='literal-cancel':self.dismiss(None)
         elif key=='literal-attachment':
-            from api_agent.desktop.dialogs import ChoiceDialog
+            from api_agent.desktop.views.dialogs import ChoiceDialog
             self.app.push_screen(ChoiceDialog('Выберите совместимое публичное значение',[(str(i),
                 f"{f['path']} = {f['value']} · Run {f['source'].get('run_id','')}" ) for i,f in enumerate(self.choices)]),self.chosen)
         elif key=='literal-apply':

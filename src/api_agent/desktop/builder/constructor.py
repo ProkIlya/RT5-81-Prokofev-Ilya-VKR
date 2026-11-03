@@ -1,13 +1,14 @@
 """Диалог карточек рядом с composer; Apply не является принятием/запуском Run."""
+from api_agent.desktop.components.controls import Button, Input, Select, Summary as Static
 from copy import deepcopy
 import json
 from pathlib import Path
 import uuid
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, DataTable, Input, Label, Select, Static, TextArea
+from textual.widgets import DataTable, Label, TextArea
 
-from api_agent.desktop.constructor_state import ConstructorState
-from api_agent.desktop.constructor_widgets import EditorDialog
+from api_agent.desktop.builder.constructor_state import ConstructorState
+from api_agent.desktop.builder.constructor_widgets import EditorDialog
 from api_agent.openapi import load_source
 from api_agent.policy.config import ProjectConfig
 
@@ -28,7 +29,8 @@ class OperationPicker(EditorDialog):
     def refresh_rows(self):
         table=self.query_one(DataTable);table.clear()
         for row in self.state.operations(search=self.query_one(Input).value,method=self.query_one(Select).value):
-            table.add_row(row['id'],method_text(row['method']),row['path'],key=row['id'])
+            from api_agent.desktop.components.controls import highlighted
+            table.add_row(row['id'],method_text(row['method']),highlighted(row['path']),key=row['id'])
     def on_input_changed(self,event):
         if self.is_mounted:self.refresh_rows()
     def on_select_changed(self,event):
@@ -43,7 +45,7 @@ class TransferDialog(EditorDialog):
     def compose(self):
         with Vertical(classes='editor-shell'):
             yield Label('Экспорт условий' if self.export else 'Импорт условий · без запуска')
-            yield TextArea(self.state.export_text() if self.export else '',id='transfer-text',read_only=self.export,language='json')
+            yield TextArea(self.state.export_text() if self.export else '',id='transfer-text',read_only=self.export,language='json',theme='monokai' if self.app.current_theme.dark else 'github_light')
             yield Input(placeholder='Локальный файл UTF-8 (необязательно)',id='transfer-path')
             yield Static('',id='transfer-error',classes='editor-error')
             with Horizontal(classes='editor-actions'):
@@ -71,7 +73,7 @@ class TransferDialog(EditorDialog):
         except (ValueError,OSError) as error:self.error('constructor: '+str(error))
 
 
-from api_agent.desktop.presentation import card_summary, method_text, SELECTORS
+from api_agent.desktop.presentation.presentation import card_summary, method_text, SELECTORS, sources_summary
 
 
 class ConstructorDialog(EditorDialog):
@@ -94,22 +96,25 @@ class ConstructorDialog(EditorDialog):
             with Horizontal(classes='editor-actions'):
                 if not self.readonly:yield Button('Применить',id='constructor-apply',variant='primary')
                 yield Button('Закрыть' if self.readonly else 'Отмена',id='constructor-cancel')
-    def on_mount(self):self.query_one(DataTable).add_columns('Вкл','Операция / название','HTTP','Вызов');self.refresh_rows()
+    def on_mount(self):self.query_one(DataTable).add_columns('Вкл','Операция / название','HTTP','Вызов','Источники');self.refresh_rows()
     def refresh_rows(self):
         table=self.query_one(DataTable);table.clear()
         for index,card in enumerate(self.state.cards):
-            table.add_row('✓' if card.get('enabled',True) else '—',card.get('name') or card['operation_id'],
-                ','.join(map(str,card['statuses'])),SELECTORS.get(card.get('selector','last'),'последний подходящий'),key=str(index))
-        if self.state.cards:self.query_one('#card-detail',Static).update(card_summary(self.state.cards[0]))
+            from api_agent.desktop.components.controls import highlighted
+            table.add_row(highlighted('✓' if card.get('enabled',True) else '—'),card.get('name') or card['operation_id'],
+                highlighted(','.join(map(str,card['statuses']))),SELECTORS.get(card.get('selector','last'),'последний подходящий'),
+                highlighted(sources_summary(card,self.state.attachments)),key=str(index))
+        table.styles.height=min(12,max(3,len(self.state.cards)+1))
+        if self.state.cards:self.query_one('#card-detail',Static).update(card_summary(self.state.cards[0],self.state.attachments))
         else:self.query_one('#card-detail',Static).update('Набор пуст: Research · проверки не настроены')
     def selected(self):
         table=self.query_one(DataTable)
         return min(table.cursor_row,len(self.state.cards)-1) if self.state.cards else None
     def on_data_table_row_selected(self,event):
-        self.query_one('#card-detail',Static).update(card_summary(self.state.cards[int(str(event.row_key.value))]))
+        self.query_one('#card-detail',Static).update(card_summary(self.state.cards[int(str(event.row_key.value))],self.state.attachments))
     def edit(self,operation,index=None):
         if operation is None:return
-        from api_agent.desktop.card_editor import CardEditor
+        from api_agent.desktop.builder.card_editor import CardEditor
         card=self.state.cards[index] if index is not None else {'id':'c'+uuid.uuid4().hex[:12],
             'operation_id':operation,'statuses':[],'assertions':[],'enabled':True}
         def saved(value):
@@ -118,6 +123,10 @@ class ConstructorDialog(EditorDialog):
             else:self.state.cards[index]=value
             self.refresh_rows()
         self.app.push_screen(CardEditor(self.state,card),saved)
+    def on_key(self,event):
+        if event.key=='backspace' and not self.readonly and isinstance(self.focused,DataTable):
+            self.on_button_pressed(Button.Pressed(self.query_one('#card-delete',Button)));event.stop();event.prevent_default()
+        else:super().on_key(event)
     def on_button_pressed(self,event):
         event.stop();key=event.button.id;index=self.selected()
         try:

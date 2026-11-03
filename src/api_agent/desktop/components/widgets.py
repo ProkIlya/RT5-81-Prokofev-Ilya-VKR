@@ -3,7 +3,7 @@ import json
 from rich.syntax import Syntax
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input, Select, Static, TextArea
+from textual.widgets import Button, DataTable, Input, Select, Static, TextArea, Checkbox, OptionList
 
 
 class PageDialog(ModalScreen):
@@ -28,6 +28,12 @@ class PageDialog(ModalScreen):
             (self.focus_previous if key in {'left','up'} else self.focus_next)();event.stop();event.prevent_default()
         elif isinstance(focused,Input) and key in {'up','down'}:
             (self.focus_previous if key=='up' else self.focus_next)();event.stop();event.prevent_default()
+        elif isinstance(focused,Checkbox) and key in {'up','down'}:
+            (self.focus_previous if key=='up' else self.focus_next)();event.stop();event.prevent_default()
+        elif isinstance(focused,Select) and not focused.expanded and key in {'left','right'}:
+            (self.focus_previous if key=='left' else self.focus_next)();event.stop();event.prevent_default()
+        elif isinstance(focused,OptionList) and key in {'left','right'}:
+            (self.focus_previous if key=='left' else self.focus_next)();event.stop();event.prevent_default()
         elif isinstance(focused,DataTable) and ((key=='up' and focused.cursor_row==0) or
                 (key=='down' and focused.cursor_row>=focused.row_count-1)):
             searches={'operations':'#op-search','operation-table':'#operation-search'}
@@ -54,15 +60,16 @@ class JsonCode(Static):
 
 class SplitHandle(Widget,can_focus=True):
     DEFAULT_CSS='''
-    SplitHandle {height: 1; width: 100%; background: $panel; color: $text-muted;}
+    SplitHandle {height: 1; width: 100%; background: transparent; color: $foreground 40%;}
     SplitHandle.vertical {width: 1; height: 100%;}
-    SplitHandle:hover, SplitHandle:focus {background: $accent;}
+    SplitHandle:hover, SplitHandle:focus {background: transparent; color: $accent;}
     '''
     def __init__(self,target,*,vertical=False,**kwargs):
         super().__init__(classes='vertical' if vertical else '',**kwargs)
         self.target=target;self.vertical=vertical;self.dragging=False
         self.tooltip='Изменить размер: перетащите мышью или используйте стрелки'
-    def render(self):return '│' if self.vertical else '─'
+    def render(self):
+        return '\n'.join('│' for _ in range(max(1,self.size.height))) if self.vertical else '─'*max(1,self.size.width)
     def change(self,delta):
         target=self.app.query_one(self.target)
         current=target.size.width if self.vertical else target.size.height

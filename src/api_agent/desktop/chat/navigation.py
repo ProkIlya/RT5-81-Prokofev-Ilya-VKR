@@ -1,9 +1,11 @@
 """Контекстная навигация и настройки приложения, без постоянно видимой панели CRUD."""
+from api_agent.desktop.components.controls import Button, Input, Select, Summary as Static
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Tree, Button, Label, Input, Select, Static
+from textual.widgets import Tree, Label
 from rich.text import Text
-from api_agent.desktop.dialogs import ChoiceDialog, FormDialog
-from api_agent.desktop.widgets import PageDialog
+from api_agent.desktop.views.dialogs import ChoiceDialog, FormDialog
+from api_agent.desktop.components.widgets import PageDialog
+from api_agent.desktop.components.menus import PopupMenu
 
 DEFAULT_WORKER='sha256:64ca2ab5a6e2c647181590be7c8553e77af76e6b073e70c4a4f38b83d6c30b03'
 
@@ -16,7 +18,7 @@ class NavigationTree(Tree):
         line=event.style.meta.get('line')
         node=self.get_node_at_line(line) if isinstance(line,int) else None
         if node:self.select_node(node)
-        self.app.navigation_menu(node.data if node else None);event.stop()
+        self.app.navigation_menu(node.data if node else None,point=(self.region.right-2,event.screen_y));event.stop()
 
 
 class AppSettings(PageDialog):
@@ -25,13 +27,18 @@ class AppSettings(PageDialog):
         with Vertical(classes='page-shell'):
             yield Label('Настройки приложения',classes='page-title')
             with VerticalScroll(classes='page-body'):
-                yield Button('Модели',id='settings-models')
-                yield Label('Изолированный исполнитель')
-                yield Static('Общий подготовленный Docker-образ для новых проектов. Существующие запуски сохраняют исходный исполнитель.')
-                yield Input(self.store.setting('worker_image',DEFAULT_WORKER),placeholder='sha256:…',id='settings-worker')
-                yield Static('',id='settings-error',classes='editor-error')
-                yield Label('Оформление')
-                yield Select([('Тёмная','textual-dark'),('Светлая','textual-light')],value='textual-light' if self.app.theme=='textual-light' else 'textual-dark',allow_blank=False,id='settings-theme')
+                with Vertical(classes='settings-group'):
+                    yield Label('Модели',classes='section-title')
+                    yield Static('Конфигураций: '+str(len(self.store.models()))+'\nВыбор для каждой новой цели — возле отправки.',classes='field-help')
+                    yield Button('Открыть каталог моделей →',id='settings-models')
+                with Vertical(classes='settings-group'):
+                    yield Label('Оформление',classes='section-title')
+                    yield Select([('Тёмная','textual-dark'),('Светлая','textual-light')],value='textual-light' if self.app.theme=='textual-light' else 'textual-dark',allow_blank=False,id='settings-theme')
+                with Vertical(classes='settings-group'):
+                    yield Label('Изолированный исполнитель',classes='section-title')
+                    yield Static('Подготовленный Docker-образ новых проектов. Прошлые запуски сохраняют свой исполнитель.',classes='field-help')
+                    yield Input(self.store.setting('worker_image',DEFAULT_WORKER),placeholder='sha256:…',id='settings-worker')
+                    yield Static('',id='settings-error',classes='editor-error')
             with Horizontal(classes='page-actions'):
                 yield Button('Сохранить',id='settings-save',variant='primary');yield Button('Назад',id='settings-close')
     def on_button_pressed(self,event):
@@ -62,9 +69,11 @@ class NavigationMixin:
                 item=node.add_leaf(Text(session['label']+' '+marker),data=(project['id'],session['id']))
                 if selected==item.data:tree.move_cursor(item)
         tree.root.add_leaf(Text('+ Добавить проект',style='bold cyan'),data=(None,None));tree.root.expand()
-    def navigation_menu(self,data):
+    def navigation_menu(self,data,point=None):
         if not data or data==(None,None):self.project_form();return
         project,session=data
+        tree=self.query_one('#navigation',Tree)
+        point=point or (tree.region.right-2,max(tree.region.y,tree.region.y+tree.cursor_line-int(tree.scroll_y)))
         if session:
             def action(key):
                 if key=='rename':
@@ -83,7 +92,7 @@ class NavigationMixin:
                                 target=others[0]['id'] if others else self.store.add_session(project)
                                 self.open_session(project,target)
                     self.push_screen(ChoiceDialog('Удалить сессию из списка? История запусков сохранится.',[('yes','Удалить из списка'),('no','Отмена')]),confirmed)
-            self.push_screen(ChoiceDialog('Действия сессии',[('rename','Переименовать'),('delete','Удалить сессию')]),action)
+            self.push_screen(PopupMenu('Сессия',[('rename','✎ Переименовать'),('delete','× Удалить сессию')],tree,point=point),action)
         else:
             def action(key):
                 if not key:return
@@ -99,7 +108,7 @@ class NavigationMixin:
                         if value:self.store.hide_session(project,value,hidden=False);self.refresh_navigation()
                     self.push_screen(ChoiceDialog('Скрытые сессии',[(s['id'],s['label']) for s in hidden]),restore)
                 else:self.project_action(key)
-            self.push_screen(ChoiceDialog('Действия проекта',[('session','Новая сессия'),('results','Сохранённые результаты'),('catalog','Каталог операций'),('policy','Политики операций'),('settings','Настройки проекта'),('restore','Восстановить удалённую из списка сессию')]),action)
+            self.push_screen(PopupMenu('Проект',[('session','+ Новая сессия'),('results','Сохранённые результаты'),('catalog','Каталог операций'),('policy','Политики операций'),('settings','Настройки проекта'),('restore','Восстановить сессию')],tree,point=point),action)
     def on_tree_node_selected(self,event):
         if event.control.id!='navigation' or not event.node.data:return
         project,session=event.node.data
@@ -107,12 +116,11 @@ class NavigationMixin:
         elif session:self.open_session(project,session)
     def show_settings(self):self.push_screen(AppSettings(self.store),lambda value:self.show_models() if value=='models' else None)
     def action_command_palette(self):
-        self.push_screen(ChoiceDialog('Команды приложения',[('help','Клавиши и управление'),('screenshot','Сохранить снимок экрана'),('settings','Настройки приложения'),('quit','Выйти')]),self.command_selected)
+        self.push_screen(PopupMenu('Команды',[('help','Клавиши и управление'),('screenshot','Сохранить снимок экрана'),('settings','Настройки приложения'),('quit','Выйти')],self.query_one('#command-menu')),self.command_selected)
     def command_selected(self,key):
         if key=='settings':self.show_settings()
         elif key=='quit':self.action_quit()
         elif key=='screenshot':self.notify('Снимок сохранён: '+str(self.save_screenshot()),title='Снимок экрана')
-        elif key=='help':self.push_screen(ChoiceDialog('Управление: Esc закрывает это окно',[
-            ('','Tab / Shift+Tab — переход между элементами'),('','F2 — список проектов; F3 — показать / скрыть инспектор'),
-            ('','F5 — запуск / остановка / продолжение'),('','ПКМ / стрелка вправо — действия проекта или сессии'),
-            ('','Space / нажатие на поле HTTP — прикрепление'),('','Ctrl+S — сохранить ввод; Ctrl+Q — выход')]))
+        elif key=='help':
+            from api_agent.desktop.views.help_view import HelpDialog
+            self.push_screen(HelpDialog())

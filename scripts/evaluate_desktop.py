@@ -6,8 +6,8 @@ import sys
 import uuid
 sys.path[:0]=[str(Path(__file__).resolve().parents[1]/p) for p in ('src','tests','')]
 
-from api_agent.desktop.controller import DesktopController
-from api_agent.desktop.store import DesktopStore
+from api_agent.desktop.application.controller import DesktopController
+from api_agent.desktop.state.store import DesktopStore
 from api_agent.policy.config import ProjectConfig
 from selected_support import DeviceServer,catalog_config
 

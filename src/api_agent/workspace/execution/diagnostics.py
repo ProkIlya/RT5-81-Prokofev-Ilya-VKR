@@ -4,7 +4,7 @@ from api_agent.goals.checks.compiler import PRIVATE_NAMES
 
 REASONS = {'sequence_index_type', 'mapping_key_missing', 'not_subscriptable', 'not_iterable'}
 HINTS = {
-    'sequence_index_type': 'A JSON list requires an integer index, not a field name. Use the actual response body shape; iterate list items or select an item before reading its fields.',
+    'sequence_index_type': 'A JSON list requires an integer index, not a field name. If the SDK response body is an array, response["body"] IS the list: use for item in response["body"], then item["field"]. Do not add ["value"] after response["body"]; body_view is feedback metadata, not another wrapper in Python. Reuse the existing response variable instead of repeating a successful HTTP call.',
     'mapping_key_missing': 'The mapping has no requested key. An SDK result is a wrapper: result["body"] contains the API JSON. Read JSON fields inside result["body"], not directly from result. Use the actual body shape and returned fields; do not invent identifiers.',
     'not_subscriptable': 'This value cannot be indexed. Check the actual response body type before accessing a field or item.',
     'not_iterable': 'This value cannot be iterated. Check the actual response body type before a loop or collection expression.',

@@ -1,14 +1,16 @@
 """Сообщения, актуальный HTTP-инспектор и явное копирование результатов."""
+from api_agent.desktop.components.controls import Button, Summary as Static
+from api_agent.desktop.components.controls import highlighted
 from copy import deepcopy
 import json
 import uuid
 from urllib.parse import urlsplit
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Label, ListItem, ListView, Static, TextArea, TabbedContent
-from api_agent.desktop.inspector import JsonInspector
-from api_agent.desktop.presentation import conditions_summary, card_summary, duration, method_text, literal, error_text
-from api_agent.desktop.trace_export import run_trace
-from api_agent.desktop.ui_errors import read_feedback
+from textual.widgets import DataTable, Label, ListItem, ListView, TextArea, TabbedContent
+from api_agent.desktop.views.inspector import JsonInspector
+from api_agent.desktop.presentation.presentation import conditions_summary, card_summary, duration, method_text, literal, error_text
+from api_agent.desktop.presentation.trace_export import run_trace
+from api_agent.desktop.presentation.ui_errors import read_feedback
 
 
 class MessageItem(ListItem):
@@ -16,7 +18,7 @@ class MessageItem(ListItem):
         super().__init__(id=key,classes='user-message' if message['role']=='user' else 'agent-message')
         self.message=message;self.summary=summary
     def compose(self):
-        with Vertical():
+        with Vertical(classes='bubble'):
             yield Label('Вы' if self.message['role']=='user' else 'Ответ агента' if self.message.get('model_answer',True) else 'Сообщение приложения',classes='message-role')
             yield Static(self.message['content'],markup=False,classes='message-text')
             if self.summary:yield Static(self.summary,markup=False,classes='program-result')
@@ -25,7 +27,17 @@ class MessageItem(ListItem):
                     if self.message['role']=='assistant':
                         yield Button('⧉ Ответ',id='answer-'+self.id,tooltip='Копировать текст ответа')
                         yield Button('⧉ JSON-трейс',id='trace-'+self.id,tooltip='Копировать JSON-трейс этого запуска')
-                    else:yield Button('⧉ Условия',id='conditions-'+self.id,tooltip='Копировать включённые условия в JSON')
+                    else:
+                        yield Button('⧉ Цель',id='goal-'+self.id,tooltip='Копировать текст цели')
+                        yield Button('⧉ Условия',id='conditions-'+self.id,tooltip='Копировать включённые условия в JSON')
+    def on_mount(self):self.fit_bubble()
+    def on_resize(self):self.fit_bubble()
+    def fit_bubble(self):
+        available=max(12,self.parent.size.width-4) if self.parent else 60
+        maximum=max(12,int(available*.9))
+        width=max(24,max((len(line) for line in (self.message['content']+'\n'+self.summary).splitlines()),default=0)+4)
+        # Отложенный Mount/Resize допустим после снятия children через clear().
+        for bubble in self.query('.bubble'):bubble.styles.width=min(maximum,width)
 
 
 class ConversationMixin:
@@ -57,12 +69,12 @@ class ConversationMixin:
         if message and message.get('run_id'):self.inspect_message(message['run_id'],message['role'])
         elif message:self.set_status('Цель принята к подготовке. Инспектор откроется после создания запуска.')
     def copy_message(self,key):
-        for prefix in ['answer-','trace-','conditions-']:
+        for prefix in ['answer-','goal-','trace-','conditions-']:
             if not key.startswith(prefix):continue
             message=self.message_data.get(key[len(prefix):])
             if not message:return False
             run=self.controller.read_run(self.project,self.session,message['run_id'])
-            if prefix=='answer-':text=message['content']
+            if prefix in {'answer-','goal-'}:text=message['content']
             elif prefix=='trace-':text=run_trace(run)
             else:
                 manifest=run['admission_manifest']['goal_contract']['manifest']
@@ -93,12 +105,16 @@ class InspectorMixin:
         self.conditions=(run.get('report') or {}).get('conditions',[])
         manifest=((run.get('admission_manifest') or {}).get('goal_contract') or {}).get('manifest',{})
         names={c['id']:(c.get('name') or c['operation_id']).strip() for c in manifest.get('cards',[]) if c.get('enabled',True)}
+        previous=None
         for index,result in enumerate(self.conditions):
             scope=result.get('scope') or {};name=names.get(scope.get('id'),'Проверка')
+            if scope.get('id')!=previous:
+                previous=scope.get('id')
+                table.add_row(highlighted('Карточка: '+name),'','','',key='group-'+str(index))
             expected=result.get('expected') or {};field=expected.get('path','HTTP-статус')
             expected_value=expected.get('value',expected.get('values',expected.get('expected','Наличие поля')))
-            table.add_row(name+' · '+field,literal(expected_value),literal(result.get('actual')),
-                result['verdict']+' · '+('ожидание подтверждено' if result.get('reason')=='expectation_met' else error_text(result.get('reason',''))),key=str(index))
+            table.add_row(highlighted('  '+field),highlighted(literal(expected_value)),highlighted(literal(result.get('actual'))),
+                highlighted(result['verdict']+' · '+('ожидание подтверждено' if result.get('reason')=='expectation_met' else error_text(result.get('reason','')))),key=str(index))
     @read_feedback
     def refresh_exchanges(self,*,preserve=False):
         if not self.inspected_run:return
@@ -109,8 +125,10 @@ class InspectorMixin:
         for row in page['items']:
             request=row['request'];url=urlsplit(str(request.get('url') or ''))
             route=url.path+('?' + url.query if url.query else '')
-            table.add_row(str(row['sequence']),method_text(str(request.get('method'))),route,
-                str(row.get('status') or row['outcome']),duration(row.get('wall_seconds'))+
+            outcome=row['outcome'];status=str(row['status']) if row.get('status') else ''
+            if outcome!='received':status+=(' · ' if status else '')+error_text(outcome)
+            table.add_row(str(row['sequence']),method_text(str(request.get('method'))),highlighted(route),
+                highlighted(status),duration(row.get('wall_seconds'))+
                 (' · НЕОПРЕДЕЛЁН' if row.get('effect_status')=='uncertain' else ''),key=row['exchange_id'])
         if page.get('more'):table.add_row('…','','Следующие 20','','',key='__more__')
         if preserve and table.row_count:table.move_cursor(row=min(cursor,table.row_count-1),animate=False)
@@ -120,6 +138,7 @@ class InspectorMixin:
     def on_data_table_row_selected(self,event):
         key=str(event.row_key.value)
         if event.control.id=='conditions':
+            if key.startswith('group-'):return
             ids=self.conditions[int(key)].get('evidence_ids',[])
             if ids:self.show_exchange(ids[-1]);self.query_one(TabbedContent).active='trace-tab'
         elif event.control.id=='exchanges':

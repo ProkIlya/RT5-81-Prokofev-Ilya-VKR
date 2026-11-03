@@ -1,12 +1,14 @@
 """Несколько проверок в одном редакторе, JSON коллекции и отрицательный запрос."""
+from api_agent.desktop.components.controls import Button, Input, Select, Summary as Static
 from copy import deepcopy
 import json
 from textual.containers import Vertical, VerticalScroll, Horizontal
-from textual.widgets import Button, Input, Label, Select, Static, TextArea, DataTable
-from api_agent.desktop.widgets import PageDialog
-from api_agent.desktop.constructor_state import typed_literal
-from api_agent.desktop.presentation import assertion_summary, error_text
+from textual.widgets import Label, TextArea, DataTable
+from api_agent.desktop.components.widgets import PageDialog
+from api_agent.desktop.builder.constructor_state import typed_literal
+from api_agent.desktop.presentation.presentation import assertion_summary, error_text
 from api_agent.goals.checks.selected_compile import _assertion, _negative
+from api_agent.desktop.builder.schema_examples import example, decimal_text
 
 PREDICATES=[('Равно','equals'),('Не равно','not_equals'),('Поле существует','exists'),
  ('Ответ соответствует схеме','schema'),('Число с округлением','number_rounded'),('Число с допуском','number_within'),('Коллекция JSON','collection')]
@@ -40,18 +42,22 @@ def rows_json(rows):
 class AssertionEditor(PageDialog):
     DEFAULT_CSS='''
     AssertionEditor #response-editor, AssertionEditor #request-editor {height: auto;}
-    AssertionEditor #collection-json {height: 10;}
-    AssertionEditor #batch-assertions {height: 8;}
+    AssertionEditor #collection-json {height: 6; min-height: 3;}
+    AssertionEditor #batch-assertions {height: 4; max-height: 5;}
     '''
     def __init__(self,state,fields,*,assertion=None,assertions=None,operation=None,statuses=None,negative=None):
         super().__init__();self.state=state;self.fields=fields;self.operation=operation;self.statuses=statuses or []
         self.items=deepcopy(assertions if assertions is not None else ([assertion] if assertion else []))
         self.negative=deepcopy(negative);self.editing=None
+        self.collection_generated='[]';self.collection_dirty=False
     def compose(self):
         with Vertical(classes='page-shell'):
             yield Label('Проверки карточки',classes='page-title')
             with VerticalScroll(classes='page-body'):
-                yield Select([('Проверка ответа','response'),('Проверка запроса: намеренное нарушение схемы','request')],value='response',allow_blank=False,id='assertion-target')
+                targets=[('Проверка ответа','response')]
+                if self.operation and self.state.request_fields(self.operation)['body']:
+                    targets.append(('Проверка запроса: намеренное нарушение схемы','request'))
+                yield Select(targets,value='response',allow_blank=False,id='assertion-target')
                 with Vertical(id='response-editor'):
                     yield Select([x for x in PREDICATES if x[1]!='collection' or any(s.get('type')=='array' for s in self.fields.values())],value='equals',allow_blank=False,id='assertion-kind')
                     yield Select([],prompt='Поле JSON-ответа',id='assertion-path')
@@ -59,14 +65,14 @@ class AssertionEditor(PageDialog):
                     yield Static('',id='assertion-path-error',classes='editor-error')
                     yield Input(placeholder='Ожидаемое значение; строка без кавычек',id='assertion-value')
                     yield Static('',id='assertion-value-error',classes='editor-error')
-                    yield Input(placeholder='Ожидаемое число, например 0.10',id='assertion-number')
-                    yield Input(placeholder='Допуск больше нуля, например 0.01',id='assertion-tolerance')
+                    yield Input(placeholder='Число с точкой: 0.10 (запятая преобразуется в точку)',id='assertion-number')
+                    yield Input(placeholder='Допуск с точкой: 0.01',id='assertion-tolerance')
                     yield Select([('Содержит ожидаемые элементы','includes'),('Точное совпадение выбранных полей','exact')],value='includes',allow_blank=False,id='collection-mode')
-                    yield TextArea('[]',language='json',id='collection-json')
-                    yield Static('JSON-массив. Пример: [{"id": 1, "name": "Пример"}]. Порядок не важен; повторы требуют разных фактических элементов.',id='collection-help',classes='field-help')
+                    yield TextArea('[]',language='json',theme='monokai' if self.app.current_theme.dark else 'github_light',id='collection-json')
+                    yield Static('Образец из OpenAPI — отредактируйте под ожидаемые данные. Порядок не важен; повторы требуют разных фактических элементов.',id='collection-help',classes='field-help')
                     with Horizontal(classes='page-actions'):
                         yield Button('Добавить проверку',id='assertion-add',variant='primary')
-                        yield Button('Новая строка',id='assertion-new')
+                        yield Button('Отменить редактирование',id='assertion-new')
                 with Vertical(id='request-editor'):
                     yield Static('Разрешить одно намеренное нарушение схемы перед отправкой HTTP. В карточке должен ожидаться ответ 4xx. Остальные проверки запроса сохраняются.')
                     yield Select([],prompt='Поле тела запроса',id='negative-field')
@@ -90,11 +96,14 @@ class AssertionEditor(PageDialog):
         self.refresh_controls();self.refresh_rows()
     def refresh_rows(self):
         table=self.query_one('#batch-assertions',DataTable);table.clear()
-        for i,item in enumerate(self.items):table.add_row(assertion_summary(item),key=str(i))
+        from api_agent.desktop.components.controls import highlighted
+        for i,item in enumerate(self.items):table.add_row(highlighted(assertion_summary(item)),key=str(i))
+        table.styles.height=min(5,max(2,len(self.items)+1))
         self.query_one('#batch-negative',Static).update('Отрицательный сценарий запроса: '+str(self.negative['path']) if self.negative else 'Намеренные нарушения запроса не заданы')
     def edit_row(self,index):
         self.editing=index
         self.query_one('#assertion-add',Button).label='Добавить проверку' if index is None else 'Сохранить изменения'
+        self.query_one('#assertion-new').display=index is not None
     def refresh_controls(self):
         target=self.query_one('#assertion-target',Select).value
         self.query_one('#response-editor').display=target=='response';self.query_one('#request-editor').display=target=='request'
@@ -104,13 +113,33 @@ class AssertionEditor(PageDialog):
         choices=[(p or 'Корень JSON-тела',p) for p,s in self.fields.items() if s.get('type') in kinds]
         field=self.query_one('#assertion-path',Select);old=field.value;field.set_options(choices)
         if old in dict((v,k) for k,v in choices):field.value=old
+        elif kind=='collection' and len(choices)==1:field.value=choices[0][1]
         field.display=kind!='schema'
         for key in ['assertion-value']:self.query_one('#'+key).display=kind in {'equals','not_equals'}
         self.query_one('#assertion-number').display=kind.startswith('number_')
         self.query_one('#assertion-tolerance').display=kind=='number_within'
         for key in ['collection-mode','collection-json','collection-help']:self.query_one('#'+key).display=kind=='collection'
+        self.query_one('#assertion-new').display=self.editing is not None
+        if kind=='collection' and not self.collection_dirty and self.query_one('#collection-json',TextArea).text==self.collection_generated:
+            selected=field.value
+            if selected is not Select.NULL:
+                self.collection_generated=json.dumps(example(self.fields[selected]),ensure_ascii=False,indent=2)
+                self.query_one('#collection-json',TextArea).text=self.collection_generated
+    def on_text_area_changed(self,event):
+        if event.text_area.id=='collection-json':
+            self.collection_dirty=event.text_area.text!=self.collection_generated
+    def on_input_changed(self,event):
+        if event.input.id in {'assertion-number','assertion-tolerance'} and ',' in event.input.value:
+            position=event.input.cursor_position;event.input.value=event.input.value.replace(',','.')
+            event.input.cursor_position=position
     def on_select_changed(self,event):
-        if self.is_mounted and event.select.id in {'assertion-target','assertion-kind'}:self.refresh_controls()
+        if self.is_mounted and event.select.id in {'assertion-target','assertion-kind','assertion-path'}:
+            if event.select.id!='assertion-path':self.refresh_controls()
+            elif (event.value==self.query_one('#assertion-path',Select).value
+                    and self.query_one('#assertion-kind',Select).value=='collection' and not self.collection_dirty
+                    and self.query_one('#collection-json',TextArea).text==self.collection_generated):
+                self.collection_generated=json.dumps(example(self.fields[event.value]),ensure_ascii=False,indent=2) if event.value in self.fields else '[]'
+                self.query_one('#collection-json',TextArea).text=self.collection_generated
     def item(self):
         kind=self.query_one('#assertion-kind',Select).value;value={'predicate':kind}
         if kind!='schema':
@@ -119,17 +148,23 @@ class AssertionEditor(PageDialog):
             value['path']=path
         if kind in {'equals','not_equals'}:value['value']=typed_literal(self.query_one('#assertion-value',Input).value,self.fields[value['path']])
         elif kind.startswith('number_'):
-            value['expected']=self.query_one('#assertion-number',Input).value
-            if kind=='number_within':value['tolerance']=self.query_one('#assertion-tolerance',Input).value
+            value['expected']=decimal_text(self.query_one('#assertion-number',Input).value)
+            if kind=='number_within':value['tolerance']=decimal_text(self.query_one('#assertion-tolerance',Input).value)
         elif kind=='collection':
             value.update(mode=self.query_one('#collection-mode',Select).value,rows=collection_rows(json.loads(self.query_one('#collection-json',TextArea).text)))
         _assertion(value,self.fields.get(''));return value
+    def on_key(self,event):
+        if event.key=='backspace' and isinstance(self.focused,DataTable) and self.focused.id=='batch-assertions':
+            self.on_button_pressed(Button.Pressed(self.query_one('#batch-delete',Button)));event.stop();event.prevent_default()
+        else:super().on_key(event)
     def on_button_pressed(self,event):
         event.stop();key=event.button.id
         try:
             if key=='assertion-cancel':self.dismiss(None)
             elif key=='assertion-add':
                 item=self.item()
+                if any(item==other for i,other in enumerate(self.items) if i!=self.editing):
+                    raise ValueError('Такая проверка уже есть в карточке. Измените существующую проверку.')
                 if self.editing is None and len(self.items)>=16:raise ValueError('В карточке допускается не более 16 проверок')
                 if self.editing is None:self.items.append(item)
                 elif 0<=self.editing<len(self.items):self.items[self.editing]=item

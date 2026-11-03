@@ -1,6 +1,6 @@
 """Ожидаемый отказ read API отображается без обхода integrity и без recovery."""
 from functools import wraps
-from api_agent.desktop.presentation import error_text
+from api_agent.desktop.presentation.presentation import error_text
 
 
 def read_feedback(method):

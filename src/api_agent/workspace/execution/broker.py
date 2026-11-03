@@ -388,6 +388,14 @@ class WorkspaceBroker:
             if self.session.uncertain or self.run.get('pending_mutation'):
                 self.run.update(uncertain_write=True, primary_safety_cause='uncertain_write', stop_reason='uncertain_write', status='partial')
             self.run['report'] = self.safe(report(self.run))
+            self._publish_final()
+        finally:
+            self._clear()
+            if self._lease: self._lease.__exit__(exc_type, exc, tb)
+
+    def _publish_final(self):
+        """Reader видит прежний live snapshot либо весь финальный результат."""
+        with self.history.transaction():
             try:
                 self.checkpoint()
             except WorkspaceError:
@@ -397,9 +405,6 @@ class WorkspaceBroker:
             self.run = self.safe_run()
             self.session.run = self.run
             self.history.finalize(self.run['project_id'], self.session_id, self.message_id, self.run)
-        finally:
-            self._clear()
-            if self._lease: self._lease.__exit__(exc_type, exc, tb)
 
     def _clear(self):
         """Ошибка enter также освобождает приватное состояние и временные ключи."""

@@ -22,6 +22,7 @@ from api_agent.workspace.sdk import SdkArtifact
 from api_agent.workspace.context.prompt import FINISH_SCHEMA, initial_messages, payload
 from api_agent.workspace.execution.diagnostics import HINTS
 from api_agent.workspace.context.state_view import execution_state
+from api_agent.workspace.context.finish_feedback import unsupported_passes, correction, GOAL_PROGRESS_HINT
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,11 @@ def _completed_writes(broker):
             'parameters': display_value(public(exchange.get('request_parameters', {})))}
         body = (exchange.get('request') or {}).get('json')
         if body is not None: item['body'] = display_value(public(body))
+        auth=broker.workflow.auth or {}
+        if name not in {auth.get('login_operation'),*auth.get('logout_operations',[])}:
+            observed=response_page(public((exchange.get('response') or {}).get('json')),limit=16,max_bytes=1024)
+            item['response_body']=observed['value']
+            item['response_body_complete']=observed['complete']
         result.append(item)
     return broker.safe(result)
 
@@ -149,7 +155,7 @@ def _drive(broker, worker, model, budget, options):
         initial['recovery']['spent'] = continuation['prior_ledger']
         initial['recovery']['remaining_steps'] = broker.limits.max_steps - continuation['prior_ledger']['steps']
     messages[context_index]['content'] = json.dumps(initial, ensure_ascii=False)
-    malformed = empty = 0
+    malformed = empty = finish_rejections = 0
     try:
         for index in range(broker.limits.max_steps - (continuation or {}).get('prior_ledger', {}).get('steps', 0)):
             broker.guard()
@@ -249,8 +255,14 @@ def _drive(broker, worker, model, budget, options):
                     broker.event('finish_defaults_applied', {'fields': missing,
                         'basis': 'accepted_goal_saved_evidence'})
                 try:
-                    result = broker.dispatch({'kind': 'finish' if name == 'finish_run' else name,
-                        'artifact_hash': options.artifact.hash, **args})
+                    missing=unsupported_passes(args.get('claims',[]),broker.workflow.handle_tool(broker.session,'check_goal',{})) if name=='finish_run' else []
+                    if missing:
+                        finish_rejections+=1
+                        result={'error':'unverified_success','hint':correction(broker.workflow,missing)}
+                        broker.event('unsupported_finish_rejected',{'condition_ids':missing,'attempt':finish_rejections})
+                    else:
+                        result = broker.dispatch({'kind': 'finish' if name == 'finish_run' else name,
+                            'artifact_hash': options.artifact.hash, **args})
                 except WorkspaceError as error:
                     if broker.stopped: raise
                     result = {'error': str(error)}
@@ -302,6 +314,8 @@ def _drive(broker, worker, model, budget, options):
             result['check']['coverage'] = broker.workflow.accepted.snapshot['coverage']
             result['check']['goal_verdict'] = 'UNKNOWN'
             step['observation'] = result
+            if finish_rejections>=2:
+                broker.stop('unverified_finish');return
             broker.event('model_observed', {'step': index + 1, 'tool': name,
                 'execution_id': execution_id})
             if broker.finished or broker.stopped: return
@@ -330,14 +344,7 @@ def _drive(broker, worker, model, budget, options):
                 messages.append({'role': 'user', 'content': 'Correct the Python error at line '
                     + str(result.get('error_line')) + '. ' + result['hint']
                     + ' Keep earlier completed requests; continue only missing work.'})
-            messages.append({'role': 'user', 'content': 'Selected checks assess only chosen aspects; '
-                'the whole goal is not assessed. Compare the original goal with completed API calls. '
-                'PASS/FAIL alone neither completes the goal nor blocks unrelated actions. '
-                'If feasible actions remain, execute the next code block now, even after PASS/FAIL. '
-                'A finish_run summary cannot schedule further actions. Keep expectations and failed evidence. '
-                'If all goal actions are done or further work is infeasible, call finish_run now '
-                'with the final user-facing answer in summary. A Python print is only local feedback: '
-                'it does not answer the user or finish the Run. Do not print the same result again.'})
+            messages.append({'role':'user','content':GOAL_PROGRESS_HINT})
         broker.stop('step_limit')
     finally:
         # Raw code/context не являются durable history, включая private encoded literals.

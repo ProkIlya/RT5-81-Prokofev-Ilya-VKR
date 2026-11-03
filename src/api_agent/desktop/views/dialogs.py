@@ -1,13 +1,14 @@
 """Русские формы настроек и компактные диалоги действий."""
+from api_agent.desktop.components.controls import Button, Input, Select, Summary as Static
 import json
 import uuid
 from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Collapsible, Input, Label, OptionList, Select, Static, TextArea
+from textual.widgets import Collapsible, Label, OptionList, TextArea
 from textual.widgets.option_list import Option
-from api_agent.desktop.widgets import PageDialog, JsonCode
-from api_agent.desktop.presentation import approval_summary, conditions_summary, error_text
+from api_agent.desktop.components.widgets import PageDialog, JsonCode
+from api_agent.desktop.presentation.presentation import approval_summary, conditions_summary, error_text
 
 EXAMPLES={'spec_path':r'C:\api\openapi.json','policy_path':r'C:\api\policy.json',
  'mappings_path':r'C:\api\mappings.json','history_path':r'C:\api\history.sqlite3',
@@ -30,12 +31,14 @@ class FormDialog(PageDialog):
             yield Label(self.dialog_title,classes='page-title')
             with VerticalScroll(classes='page-body'):
                 for key,label,default,options in self.fields:
-                    yield Label(label,id='label-'+key)
-                    value=self.values.get(key,default)
-                    if options:yield Select(options,value=value,allow_blank=False,id='field-'+key)
-                    else:yield Input(str(value) if value is not None else '',placeholder=EXAMPLES.get(key,''),id='field-'+key)
-                    yield Static(HELP.get(key,''),id='help-'+key,classes='field-help')
-                    yield Static('',id='error-'+key,classes='form-error')
+                    with Vertical(classes='form-field'):
+                        yield Label(label,id='label-'+key)
+                        value=self.values.get(key,default)
+                        if options:yield Select(options,value=value,allow_blank=False,id='field-'+key)
+                        else:yield Input(str(value) if value is not None else '',placeholder=EXAMPLES.get(key,''),id='field-'+key,
+                            classes='form-path' if key.endswith('path') or key in {'target','endpoint','gguf','executable'} else '')
+                        yield Static(HELP.get(key,''),id='help-'+key,classes='field-help')
+                        yield Static('',id='error-'+key,classes='form-error')
                 yield Static('',id='form-error',classes='form-error')
             with Horizontal(classes='page-actions'):
                 yield Button('Сохранить',id='form-save',variant='primary');yield Button('Отмена',id='form-cancel')
@@ -48,8 +51,7 @@ class FormDialog(PageDialog):
         gguf=choice.first().value=='gguf'
         for key in ['endpoint','model_name','gguf','executable','port','gpu_layers']:
             visible=gguf if key in {'gguf','executable','port','gpu_layers'} else not gguf
-            for prefix in ['field-','label-','help-','error-']:
-                for widget in self.query('#'+prefix+key):widget.display=visible
+            self.query_one('#field-'+key).parent.display=visible
     def on_button_pressed(self,event):
         event.stop()
         if event.button.id=='form-cancel':self.dismiss(None)

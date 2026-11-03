@@ -8,7 +8,7 @@ from api_agent.goals.checks.selected_compile import compile_selected
 from api_agent.openapi.model import PROFILE_VERSION, pointer_part
 from api_agent.policy.config import decision
 from api_agent.validation import schema_issues
-from api_agent.desktop.project_views import operation_rows
+from api_agent.desktop.views.project_views import operation_rows
 
 
 def typed_literal(text, schema):
@@ -18,6 +18,9 @@ def typed_literal(text, schema):
     elif schema.get('type') == 'string':
         value = text
     else:
+        if schema.get('type') in {'number','integer'} and ',' in text:
+            from api_agent.desktop.builder.schema_examples import decimal_text
+            text=decimal_text(text)
         try: value = json.loads(text)
         except (TypeError, ValueError): raise ValueError('Введите значение указанного типа') from None
     if schema_issues(value, schema): raise ValueError('Значение не соответствует типу/enum поля')
@@ -65,6 +68,10 @@ class ConstructorState:
             'cards': deepcopy(selected)}
 
     def compiled(self, goal, *, cards=None):
+        for current in self.cards if cards is None else cards:
+            checks=current.get('assertions',[])
+            if any(item in checks[:i] for i,item in enumerate(checks)):
+                raise ValueError('Такая проверка уже есть в карточке. Удалите дубликат перед сохранением.')
         accepted = compile_selected(self.catalog, self.config, self.document(goal, cards=cards), source='user_constructor')
         snapshot = self.config.snapshot
         for card in accepted.snapshot['cards']:

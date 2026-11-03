@@ -7,10 +7,10 @@ import sys
 import time
 import uuid
 sys.path[:0]=[str(Path(__file__).resolve().parents[1]/p) for p in ('src','tests','')]
-from api_agent.desktop.app import AgentApp
-from api_agent.desktop.controller import DesktopController
-from api_agent.desktop.dialogs import PreviewDialog
-from api_agent.desktop.store import DesktopStore
+from api_agent.desktop.application.app import AgentApp
+from api_agent.desktop.application.controller import DesktopController
+from api_agent.desktop.views.dialogs import PreviewDialog
+from api_agent.desktop.state.store import DesktopStore
 from api_agent.policy.config import ProjectConfig
 from desktop_support import project_files
 from selected_support import DeviceServer,card

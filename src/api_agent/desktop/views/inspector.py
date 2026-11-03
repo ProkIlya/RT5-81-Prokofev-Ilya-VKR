@@ -2,7 +2,7 @@
 import json
 from rich.text import Text
 from textual.widgets import Tree
-from api_agent.desktop.presentation import duration, error_text
+from api_agent.desktop.presentation.presentation import duration, error_text
 from api_agent.goals.checks.compiler import PRIVATE_NAMES
 
 

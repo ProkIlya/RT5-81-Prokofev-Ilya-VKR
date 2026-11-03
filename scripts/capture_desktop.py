@@ -9,9 +9,9 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 os.environ.pop('NO_COLOR',None)
 os.environ['FORCE_COLOR']='1'
 os.environ['COLORTERM']='truecolor'
-from api_agent.desktop.app import AgentApp
-from api_agent.desktop.store import DesktopStore
-from api_agent.desktop.inspector import JsonInspector
+from api_agent.desktop.application.app import AgentApp
+from api_agent.desktop.state.store import DesktopStore
+from api_agent.desktop.views.inspector import JsonInspector
 
 
 async def capture(args):

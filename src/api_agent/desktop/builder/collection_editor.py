@@ -4,8 +4,8 @@ import json
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, DataTable, Input, Label, Select, Static
 
-from api_agent.desktop.constructor_state import schema_fields, typed_literal
-from api_agent.desktop.constructor_widgets import EditorDialog, FieldPicker, LiteralDialog
+from api_agent.desktop.builder.constructor_state import schema_fields, typed_literal
+from api_agent.desktop.builder.constructor_widgets import EditorDialog, FieldPicker, LiteralDialog
 
 
 class RowEditor(EditorDialog):

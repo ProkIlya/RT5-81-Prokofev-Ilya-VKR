@@ -1,11 +1,13 @@
 """Сводка новой цели с включёнными карточками и явными историческими объектами."""
+from api_agent.desktop.components.controls import Button, Summary as Static
 from dataclasses import asdict
+from copy import deepcopy
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, DataTable, Label, Static
-from api_agent.desktop.constructor_widgets import EditorDialog
-from api_agent.desktop.presentation import conditions_summary, LIMITS, error_text
+from textual.widgets import DataTable, Label, Collapsible
+from api_agent.desktop.builder.constructor_widgets import EditorDialog
+from api_agent.desktop.presentation.presentation import conditions_summary, LIMITS, error_text
 from api_agent.execution.contracts import CatalogLimits
-from api_agent.desktop.ui_errors import read_feedback
+from api_agent.desktop.presentation.ui_errors import read_feedback
 
 
 class ComposerMixin:
@@ -30,7 +32,7 @@ class ComposerMixin:
 class ContinuationDetails(EditorDialog):
     def __init__(self,value):super().__init__();self.value=value
     def compose(self):
-        from api_agent.desktop.presentation import duration,literal
+        from api_agent.desktop.presentation.presentation import duration,literal
         value=self.value;model=value['model'] or {}
         with Vertical(classes='editor-shell'):
             yield Label('Сводка продолжения',classes='page-title')
@@ -59,7 +61,14 @@ class ContinuationDetails(EditorDialog):
 
 
 class DraftDetails(EditorDialog):
-    def __init__(self,owner):super().__init__(id='draft-details-dialog');self.owner=owner
+    def __init__(self,owner):
+        super().__init__(id='draft-details-dialog');self.owner=owner;self.display_draft=deepcopy(owner.draft)
+        resolved=[]
+        for descriptor in owner.draft.get('attachments',[]):
+            try:
+                with owner.controller.history(owner.project) as history:resolved.append(history.resolve_attachment(owner.project,descriptor))
+            except (ValueError,OSError):pass
+        self.display_draft['attachments']=resolved
     def compose(self):
         with Vertical(classes='editor-shell'):
             yield Label('Сводка новой цели',classes='page-title')
@@ -67,14 +76,14 @@ class DraftDetails(EditorDialog):
                 yield Static('Цель: '+self.owner.draft.get('goal',''),markup=False)
                 model=self.owner.store.model(self.owner.draft.get('model_id'),required=False)
                 yield Static('Модель: '+(model['profile']['name'] if model else 'не выбрана'),markup=False)
-                yield Label('Включённые условия')
-                yield Static(conditions_summary(self.owner.draft),id='draft-cards',markup=False)
-                yield Label('Прикреплённые объекты прошлых запусков')
-                yield Static('Это исторические наблюдения. Применимость повторно проверяется перед запуском.')
-                yield DataTable(id='attachments-table',cursor_type='row')
-                yield Static('',id='attachment-detail',markup=False)
-                yield Label('Ограничения запуска')
-                yield Static('\n'.join(LIMITS.get(k,k)+': '+str(v) for k,v in self.owner.draft_limits().items()),id='draft-limits',markup=False)
+                with Collapsible(title='Проверки',collapsed=False):
+                    yield Static(conditions_summary(self.display_draft),id='draft-cards',markup=False)
+                with Collapsible(title='Источники · '+str(len(self.owner.draft.get('attachments',[]))),collapsed=False):
+                    yield Static('Исторические наблюдения. Применимость проверяется перед запуском.',classes='field-help')
+                    yield DataTable(id='attachments-table',cursor_type='row')
+                    yield Static('',id='attachment-detail',markup=False)
+                with Collapsible(title='Лимиты',collapsed=True):
+                    yield Static('\n'.join(LIMITS.get(k,k)+': '+str(v) for k,v in self.owner.draft_limits().items()),id='draft-limits',markup=False)
                 yield Static('Проверки подтверждают выбранные аспекты цели. Изменение цели или условий создаёт новый запуск.',classes='field-help')
                 yield Static('',classes='editor-error')
             with Horizontal(classes='editor-actions'):
@@ -84,6 +93,9 @@ class DraftDetails(EditorDialog):
         table=self.query_one(DataTable);table.clear();descriptors=self.owner.draft.get('attachments',[])
         for i,item in enumerate(descriptors[:8]):table.add_row(str(i+1),str(item.get('run_id',''))[:8],', '.join(item.get('fields',[])),key=str(i))
         self.query_one('#attachment-remove',Button).disabled=not descriptors
+        table.display=bool(descriptors);table.styles.height=min(7,len(descriptors)+1)
+        table.styles.width=min(100,max(36,max((len(', '.join(d.get('fields',[])))+20 for d in descriptors),default=36)))
+        table.styles.max_width='100%'
         if descriptors:self.show_attachment(0)
         else:self.query_one('#attachment-detail',Static).update('Прикреплённых данных нет')
         if len(descriptors)>8:self.error('Можно прикрепить не более 8 объектов')

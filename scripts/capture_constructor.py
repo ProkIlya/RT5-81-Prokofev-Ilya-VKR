@@ -7,11 +7,11 @@ import sys
 sys.path[:0]=[str(Path(__file__).resolve().parents[1]/p) for p in ('src','tests','')]
 os.environ.pop('NO_COLOR',None);os.environ['FORCE_COLOR']='1';os.environ['COLORTERM']='truecolor'
 from textual.app import App
-from api_agent.desktop.constructor import ConstructorDialog
-from api_agent.desktop.constructor_state import ConstructorState
-from api_agent.desktop.card_editor import CardEditor
-from api_agent.desktop.collection_editor import CollectionEditor
-from api_agent.desktop.dialogs import PreviewDialog
+from api_agent.desktop.builder.constructor import ConstructorDialog
+from api_agent.desktop.builder.constructor_state import ConstructorState
+from api_agent.desktop.builder.card_editor import CardEditor
+from api_agent.desktop.builder.collection_editor import CollectionEditor
+from api_agent.desktop.views.dialogs import PreviewDialog
 from selected_support import catalog_config,card
 
 

@@ -55,56 +55,89 @@ def _project_dynamic_state(prefix, memory):
     return changed
 
 
-def compact_payload(payload, *, prefix_count, memory, counter, context_tokens):
-    """Сократить старые complete groups только после измеренного порога.
+def _project_results(groups, saved_memory):
+    projected = set()
+    for group in groups:
+        for message in group[1:]:
+            content = message.get('content', '')
+            if len(content.encode('utf-8')) <= 2048:
+                continue
+            if _project_result(message, content, saved_memory):
+                projected.add(id(message))
+    return projected
 
-    System/goal/accepted checks/API metadata не сокращаются. Дублированная
-    динамическая история task.state представлена один раз в working_memory.
-    Последняя complete группа и последующие application hints сохраняются.
-    Огромные tool results получают явную bounded projection; чтение оригинала
-    хранится у host; полные присвоенные ответы остаются в Python variables.
-    Это не LLM summary и не новый proof.
-    Если выигрыша нет, обычный budget guard останавливает Run при переполнении.
-    """
-    if counter is None: return payload, None
+
+def _project_result(message, content, saved_memory):
+    try:
+        value = json.loads(content)
+    except (ValueError, TypeError):
+        value = content
+    replaced = []
+    if (isinstance(value, dict) and {'check', 'responses'} <= value.keys()
+            and {'check', 'auth_session', 'api_calls'} <= saved_memory.keys()):
+        replaced = [key for key in ('check', 'state', 'responses') if key in value]
+        value = {key: item for key, item in value.items() if key not in replaced}
+    shortened = json.dumps({'context_truncated': True,
+        'original_bytes': len(content.encode('utf-8')), 'projection': response_page(value, max_bytes=1024),
+        'sections_in_working_memory': replaced,
+        'hint': 'Inspect complete responses in assigned Python variables using execute_code; '
+            'do not repeat completed writes to recover output.'},
+        ensure_ascii=False, separators=(',', ':'))
+    if len(shortened.encode('utf-8')) >= len(content.encode('utf-8')):
+        return False
+    message['content'] = shortened
+    return True
+
+
+def compact_payload(payload, *, prefix_count, memory, counter, context_tokens):
+    """По измеренному порогу сократить ответы и затем убрать старые группы."""
+    if counter is None:
+        return payload, None
     groups = _groups(payload['messages'][prefix_count:])
-    if not groups or not any(g[0].get('tool_calls') for g in groups): return payload, None
+    if groups is None:
+        return payload, None
     before = _count(counter, payload)
-    threshold = max(1, (context_tokens - payload['max_tokens'] - 32) * 3 // 4)
-    if before <= threshold: return payload, None
-    last = max(i for i, group in enumerate(groups) if group[0].get('tool_calls'))
-    removed = sum(bool(g[0].get('tool_calls')) for g in groups[:last])
-    retained = deepcopy([m for group in groups[last:] for m in group])
+    output_reserve = payload['max_tokens']
+    threshold = max(1, (context_tokens - output_reserve) * 3 // 4)
+    if before < threshold:
+        return payload, None
+
+    info = {'trigger': 'input_threshold', 'input_tokens_before': before,
+        'input_tokens_after': before, 'threshold_tokens': threshold,
+        'output_reserve': output_reserve, 'removed_message_groups': 0, 'removed_messages': 0,
+        'removed_tool_groups': 0, 'tool_results_truncated': 0,
+        'above_soft_limit': True, 'full_evidence_retained': True}
+    last_tool = next((i for i in range(len(groups) - 1, -1, -1) if groups[i][0].get('tool_calls')), None)
+    if last_tool is None:
+        return payload, info
+
+    groups = deepcopy(groups)
     saved_memory = memory()
-    projections = 0
-    for message in retained:
-        content = message.get('content', '')
-        if message.get('role') != 'tool' or len(content.encode('utf-8')) <= 2048: continue
-        try: value = json.loads(content)
-        except (ValueError, TypeError): value = content
-        replaced = []
-        if (isinstance(value, dict) and {'check','responses'} <= value.keys()
-                and {'check','auth_session','api_calls'} <= saved_memory.keys()):
-            replaced = [k for k in ('check','state','responses') if k in value]
-            value = {k:v for k,v in value.items() if k not in replaced}
-        view = response_page(value, max_bytes=1024)
-        message['content'] = json.dumps({'context_truncated': True,
-            'original_bytes': len(content.encode('utf-8')), 'projection': view,
-            'sections_in_working_memory': replaced,
-            'hint': 'Inspect complete responses in assigned Python variables using execute_code; '
-                'do not repeat completed writes to recover output.'},
-            ensure_ascii=False, separators=(',', ':'))
-        projections += 1
-    result = deepcopy(payload)
+    projected = _project_results(groups, saved_memory)
     prefix = deepcopy(payload['messages'][:prefix_count])
     dynamic_projected = _project_dynamic_state(prefix, saved_memory)
-    result['messages'] = prefix + [
-        {'role':'user','content':json.dumps({'working_memory':saved_memory,
-         'history_projection':{'removed_tool_groups':removed,'tool_results_truncated':projections,
-          'dynamic_api_history_projected':dynamic_projected,
-          'full_evidence_retained':True}},ensure_ascii=False,separators=(',', ':'))}] + retained
-    after = _count(counter, result)
-    if after >= before: return payload, None
-    return result, {'input_tokens_before': before, 'input_tokens_after': after,
-        'threshold_tokens': threshold, 'removed_tool_groups':removed,
-        'tool_results_truncated':projections, 'full_evidence_retained':True}
+    evidence = [call['exchange_id'] for call in saved_memory.get('api_calls', []) if 'exchange_id' in call]
+    removed_tools = removed_messages = 0
+    # Последний обмен и подсказки после него принадлежат текущему действию.
+    best, best_info = payload, info
+    for removed in range(last_tool + 1):
+        if removed:
+            removed_tools += bool(groups[removed - 1][0].get('tool_calls'))
+            removed_messages += len(groups[removed - 1])
+        retained = [message for group in groups[removed:] for message in group]
+        projected_count = sum(id(message) in projected for message in retained)
+        history = {'removed_tool_groups': removed_tools, 'tool_results_truncated': projected_count,
+            'dynamic_api_history_projected': dynamic_projected, 'full_evidence_retained': True}
+        memory_message = {'role': 'user', 'content': json.dumps({'working_memory': saved_memory,
+            'history_projection': history}, ensure_ascii=False, separators=(',', ':'))}
+        candidate = {**payload, 'messages': [*prefix, memory_message, *retained]}
+        after = _count(counter, candidate)
+        if after < best_info['input_tokens_after']:
+            best = candidate
+            best_info = {**info, 'input_tokens_after': after, 'removed_message_groups': removed,
+                'removed_messages': removed_messages, 'removed_tool_groups': removed_tools,
+                'tool_results_truncated': projected_count, 'above_soft_limit': after > threshold,
+                'exchange_ids': evidence}
+        if after <= threshold:
+            break
+    return best, best_info

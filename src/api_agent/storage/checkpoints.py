@@ -99,13 +99,15 @@ def recovery_memory(history, run, checkpoint):
     previous = deepcopy((run.get('continuation') or {}).get('memory', {}))
     observations = list(previous.get('observations', []))
     for event in run['exchanges']:
-        body = public_data((event.get('response') or {}).get('json'))
+        response = event.get('response') or {}
+        confirmed_json = (event['outcome'] == 'received' and not event.get('truncated')
+            and response.get('json_valid') is True and 'json' in response)
+        body = public_data(response['json']) if confirmed_json else None
         view = response_page(body, max_bytes=4096)
         item = {'run_id': run['run_id'], 'exchange_id': event['id'],
             'operation_id': event['operation_id'], 'parameters': public_data(event.get('request_parameters', {})),
-            'status': (event.get('response') or {}).get('status'), 'outcome': event['outcome'],
-            'body': view['value'], 'complete': bool(view['complete'] and not event.get('truncated')
-                and event.get('outcome') == 'received' and (event.get('response') or {}).get('json_valid')),
+            'status': response.get('status'), 'outcome': event['outcome'],
+            'body': view['value'], 'complete': view['complete'] and confirmed_json,
             'source': {'run_id': run['run_id'], 'exchange_id': event['id'], 'path': ''}}
         if not view['complete']:
             item['retained_scalars'] = retained_scalars(body)

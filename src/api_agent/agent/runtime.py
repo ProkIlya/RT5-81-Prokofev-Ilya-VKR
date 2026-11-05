@@ -12,9 +12,9 @@ from api_agent.agent.model import ModelError, ModelTimeout, configured_goal_mode
 from api_agent.agent.resilience import BudgetViolation, EmptyDecision, TokenBudget, GENERATION_REPAIR_HINT
 from api_agent.bounded_json import validate_tree, numeric_metadata
 from api_agent.openapi.parser import canonical
-from api_agent.agent.response_views import response_page
+from api_agent.agent.response_views import prioritize_root_locator, response_page
 from api_agent.workspace.context.context_window import compact_payload
-from api_agent.workspace.context.run_memory import memory_snapshot
+from api_agent.workspace.context.run_memory import memory_snapshot, project_recovery
 from api_agent.validation import fingerprint, report, schema_issues, display_value
 from api_agent.workspace.execution.broker import WorkspaceBroker, WorkspaceError
 from api_agent.workspace.execution.sandbox import WorkspaceSandbox
@@ -114,7 +114,8 @@ def _completed_writes(broker):
         if body is not None: item['body'] = display_value(public(body))
         auth=broker.workflow.auth or {}
         if name not in {auth.get('login_operation'),*auth.get('logout_operations',[])}:
-            observed=response_page(public((exchange.get('response') or {}).get('json')),limit=16,max_bytes=1024)
+            value = public((exchange.get('response') or {}).get('json'))
+            observed = response_page(prioritize_root_locator(value), limit=16, max_bytes=1024)
             item['response_body']=observed['value']
             item['response_body_complete']=observed['complete']
         result.append(item)
@@ -127,7 +128,7 @@ def _response_feedback(broker, exchange):
     value = broker.safe(response.get('json'))
     result = {'operation_id': exchange['operation_id'], 'status': response.get('status'), 'body': value}
     if len(canonical(value)) > 1024:
-        view = response_page(value, limit=16, max_bytes=2048)
+        view = response_page(prioritize_root_locator(value), limit=16, max_bytes=2048)
         result['body'] = view.pop('value')
         result['body_view'] = view
     return result
@@ -151,7 +152,7 @@ def _drive(broker, worker, model, budget, options):
     initial['state'].pop('requests_complete', None)
     continuation = broker.run.get('continuation')
     if continuation:
-        initial['recovery'] = deepcopy(continuation['memory'])
+        initial['recovery'] = project_recovery(continuation['memory'])
         initial['recovery']['spent'] = continuation['prior_ledger']
         initial['recovery']['remaining_steps'] = broker.limits.max_steps - continuation['prior_ledger']['steps']
     messages[context_index]['content'] = json.dumps(initial, ensure_ascii=False)
@@ -168,12 +169,17 @@ def _drive(broker, worker, model, budget, options):
                 request = payload(messages, options.model_name, broker.limits)
                 if options.snapshot is not None: request.update(options.snapshot['sampling'])
                 if hasattr(model, 'prepare_payload'): request = model.prepare_payload(request)
+                if broker.safe(request) != request: raise WorkspaceError('private_model_context')
                 request, measured = compact_payload(request, prefix_count=base_count,
                     memory=lambda:memory_snapshot(broker.workflow, broker.run, broker.session, broker.safe),
                     counter=budget.counter, context_tokens=broker.limits.max_context_tokens)
                 if measured:
-                    broker.run.setdefault('context_projections', []).append({**measured,'model_call':index + 1})
-                    broker.event('context_projected', measured)
+                    if measured['input_tokens_after'] < measured['input_tokens_before']:
+                        broker.run.setdefault('context_projections', []).append({**measured,'model_call':index + 1})
+                        broker.event('context_projected', measured)
+                        del messages[base_count:base_count + measured['removed_messages']]
+                    elif measured['above_soft_limit']:
+                        broker.event('context_soft_limit', measured)
                 validate_tree(request, max_depth=64, max_bytes=broker.limits.max_prompt_bytes)
                 if broker.safe(request) != request: raise WorkspaceError('private_model_context')
                 input_tokens, reserved = budget.reserve(request)
@@ -193,7 +199,9 @@ def _drive(broker, worker, model, budget, options):
             broker.reserve_active('model', getattr(model, 'timeout', broker.limits.max_seconds) if bounded else broker.limits.max_seconds)
             try:
                 try:
-                    broker.event('model_requested', {'step': index + 1, 'interface': 'execute_code'})
+                    broker.event('model_requested', {'step': index + 1, 'interface': 'execute_code',
+                        'input_tokens': input_tokens, 'reserved_tokens': reserved,
+                        'context_tokens': broker.limits.max_context_tokens})
                     broker.guard()
                     if bounded:
                         model.set_deadline(min(broker.session.deadline, time.monotonic() + broker.remaining_active('model')))
@@ -320,20 +328,15 @@ def _drive(broker, worker, model, budget, options):
                 'execution_id': execution_id})
             if broker.finished or broker.stopped: return
             context_call = deepcopy(call)
-            discarded = len(messages) - base_count
             task_context = json.loads(messages[context_index]['content'])
             task_context['state'] = result['state']
             if feedback_checks is not None: task_context['checks'] = deepcopy(feedback_checks)
             messages[context_index]['content'] = json.dumps(task_context, ensure_ascii=False)
-            # Полная история остаётся в Run; следующий контекст — закреплённая
-            # цель плюс последний код, текущие checks/ответы и следующий запрос.
+            # Полные пары остаются в очереди сообщений до измеренного сжатия.
             model_observation = deepcopy(result)
             model_observation.pop('state', None)
-            messages[base_count:] = [{'role': 'assistant', 'content': '', 'tool_calls': [context_call]},
-                {'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(model_observation, ensure_ascii=False)}]
-            if discarded:
-                broker.event('code_context_refreshed', {'discarded_messages': discarded,
-                    'projection': 'accepted_goal_current_evidence'})
+            messages.extend([{'role': 'assistant', 'content': '', 'tool_calls': [context_call]},
+                {'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(model_observation, ensure_ascii=False)}])
             diagnostic = result.get('preflight') or {}
             if diagnostic.get('hint'):
                 # Инструкция приложения, не текст API/worker; тот же correction budget.

@@ -5,6 +5,14 @@ import json
 from api_agent.openapi.parser import pointer_get
 
 
+def prioritize_root_locator(value):
+    """В проекции корневой id/uuid предшествует идентификаторам связей."""
+    if not isinstance(value, dict):
+        return value
+    root = {key: value[key] for key in ('id', 'uuid') if key in value}
+    return {**root, **value}
+
+
 def _bytes(value):
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
 

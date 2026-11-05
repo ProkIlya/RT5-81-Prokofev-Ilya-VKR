@@ -130,7 +130,11 @@ class LocalModel:
                 if len(raw) > 1048576:
                     raise ModelError("tokenizer_response_limit")
                 result = json.loads(raw)
-                validate_tree(result)
+                if path == "/tokenize":
+                    # Oversized вход тоже нужно измерить, чтобы сжать его до генерации.
+                    validate_tree(result, max_nodes=131072)
+                else:
+                    validate_tree(result)
                 return result
         except ModelError:
             raise

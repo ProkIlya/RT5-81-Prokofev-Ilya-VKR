@@ -11,7 +11,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import (DataTable, Footer, Header, Label, ListItem, ListView,
+from textual.widgets import (DataTable, Footer, Header, Label, ListItem, ListView, ProgressBar,
     TabbedContent, TabPane, TextArea, Tree, Collapsible)
 
 from api_agent.desktop.application.controller import DesktopController
@@ -65,7 +65,11 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
     #status.error {background: $error; color: $text; text-style: bold; padding: 0 1;}
     #draft-summary {display: none;}
     #messages-more {height: 1; display: none;}
-    #model-picker {width: 1fr; min-width: 10;}
+    #model-picker {width: auto; min-width: 10; max-width: 32;}
+    .narrow #model-picker {max-width: 21;}
+    #context-meter {width: 1fr; height: 1; margin: 0 1 0 0;}
+    #context-meter Label {width: auto; margin-right: 1; color: $text-muted;}
+    #context-usage {width: 1fr;}
     #inspector {height: 45%; min-height: 8;}
     #inspector-head {height: 3;}
     #inspector-label {width: 1fr; padding-top: 1;}
@@ -92,6 +96,7 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
         self.selection=None;self.closing=False;self.prepared=None
         self.draft_revision=0;self.pending_submission=None
         self.pending_goal=None;self.rendered_message_ids=[];self.rendered_scope=None;self.inspected_role=None
+        self.context_measurement=None
         self.theme=store.setting('theme','textual-dark')
 
     def compose(self)->ComposeResult:
@@ -132,6 +137,9 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
                 yield Static('',id='draft-summary')
                 with Horizontal(id='controls'):
                     yield Button('Условия · 0',id='conditions-edit')
+                    with Horizontal(id='context-meter'):
+                        yield Label('Контекст')
+                        yield ProgressBar(total=1, show_eta=False, id='context-usage')
                     yield Button('Модель · выбрать',id='model-picker')
                     yield Button('Подробнее',id='draft-details')
                     yield Button('↑',id='send',variant='primary',tooltip='Отправить цель · F5')
@@ -139,6 +147,7 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
 
     def on_mount(self):
         self.query_one('#inspector').display=False
+        self.refresh_context_usage()
         self.query_one('#exchanges',DataTable).add_columns('№','Метод','Путь','HTTP','Время / эффект')
         self.query_one('#conditions',DataTable).add_columns('Условие','Ожидалось','Получено','Итог / причина')
         self.restore_sessions();self.refresh_navigation();self.refresh_composer();self.set_interval(0.15,self.poll_events)
@@ -207,6 +216,21 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
         self.query_one('#session-title',Label).update(self.store.project(project)['label']+' / '+label)
         self.query_one('#inspector').display=False;self.remove_class('inspector-full');self.inspected_run=None
         self.message_offset=0;self.selection=None;self.query_one('#json-tree',JsonInspector).reset_exchange();self.refresh_messages();self.update_controls()
+        self.refresh_context_usage()
+
+    def refresh_context_usage(self):
+        meter = self.query_one_optional('#context-meter', Horizontal)
+        if meter is None:
+            return
+        active = (self.controller.busy and self.controller.active_scope == (self.project, self.session)
+            and self.context_measurement and self.context_measurement[0] == self.controller.current_run)
+        meter.visible = bool(active)
+        bar = meter.query_one(ProgressBar)
+        if active:
+            _, reserved, window = self.context_measurement
+            bar.update(total=window, progress=reserved)
+        elif bar.progress:
+            bar.update(total=1, progress=0)
 
     def update_controls(self):
         count=sum(bool(c.get('enabled',True)) for c in self.draft.get('cards',[]))
@@ -363,18 +387,28 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
                 elif self.follow_live and scope==(self.project,self.session):
                     self.inspect_message(value['run_id'],'user');self.query_one(TabbedContent).active='trace-tab';self.follow_live=True
             elif kind=='finished':
+                if self.context_measurement and self.context_measurement[0] == value['run_id']:
+                    self.context_measurement = None
                 if (value['project'],value['session'])==(self.project,self.session):
                     self.pending_goal=None;self.refresh_messages()
                 if self.inspected_run==value['run_id'] and self.inspected_scope==(value['project'],value['session']):
                     self.finish_inspected()
                 self.set_status('Завершено: '+error_text(value.get('stop_reason')))
-            elif kind=='error':self.set_status('Ошибка выполнения: '+error_text(value.get('stop_reason')))
+            elif kind=='error':
+                self.context_measurement = None
+                self.set_status('Ошибка выполнения: '+error_text(value.get('stop_reason')))
             elif kind=='preparation':self.set_status(value['message'])
-            elif kind=='event' and self.controller.active_scope==(self.project,self.session):
+            elif kind=='event':
+                if value.get('kind') == 'model_requested' and value['run_id'] == self.controller.current_run:
+                    details = value['details']
+                    self.context_measurement = (value['run_id'], details['reserved_tokens'], details['context_tokens'])
+                if self.controller.active_scope != (self.project, self.session):
+                    continue
                 label={'model_preflight_started':'Проверяем контекст и ресурсы',
                     'model_requested':'Модель выбирает действие…','model_received':'Проверяем ответ модели',
                     'model_observed':'Результат действия сохранён'}.get(value.get('kind'))
                 if label:self.set_status(label)
+        self.refresh_context_usage()
         self.update_run_button()
         if self.closing and not self.controller.busy and not self.preparing and not self.launching:
             try:self.controller.close();self.exit()

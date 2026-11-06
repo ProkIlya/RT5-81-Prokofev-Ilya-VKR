@@ -7,7 +7,10 @@ if __name__ == '__main__':
     if len(args) != 2:
         print('usage: python scripts/check_stage.py S10[a|b|c]|S11[a|b|c]|S12[a|b]|S13[a|b|c] good|bad', file=sys.stderr)
         raise SystemExit(3)
-    if args[0].startswith('S13'):
+    if args[0].startswith('S14'):
+        from check_setup_stage import main as setup_main
+        code = setup_main(*args)
+    elif args[0].startswith('S13'):
         from check_context_stage import main as context_main
         code = context_main(*args)
     elif args[0].startswith('S12'):

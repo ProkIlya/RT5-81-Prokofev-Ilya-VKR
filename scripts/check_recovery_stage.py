@@ -20,6 +20,7 @@ MODULES['S11c'] = ['test_continuation', 'test_continuation_guards', 'test_contin
 MODULES['S11c'].append('test_live_recovery_observer')
 MODULES['S11c'] += ['test_recovery_binding', 'test_recovery_review_guards']
 MODULES['S11c'].append('test_recovery_auth_versions')
+MODULES['S11c'].append('test_setup_continuation')
 MODULES['S11'] = list(dict.fromkeys(sum(MODULES.values(), []))) + ['test_code_broker', 'test_runtime_cleanup', 'test_module_size']
 
 
@@ -63,7 +64,7 @@ def main(stage, kind):
                               {'reset_epoch': 0, 'response_observation': 3600, 'create_read_link': 3600},
                               'test_reuse_observations.ReuseObservationTests.test_known_reset_blocks_preview_without_a_probe')]
                 specs_c = [('api_agent.goals.entry.continuation.check_service', {'ready': True},
-                            'test_continuation.ContinuationTests.test_health_failure_does_not_create_run_or_invoke_worker_or_model'),
+                            'test_setup_continuation.AdvisoryContinuationTests.test_failed_health_is_saved_as_warning_and_runtime_is_still_entered'),
                            ('api_agent.storage.history.SQLiteHistory.unresolved_mutations', [],
                             'test_recovery_runtime.RecoveryRuntimeTests.test_uncertain_continuation_blocks_other_mutations_too'),
                            ('api_agent.storage.checkpoints.retained_scalars', {},

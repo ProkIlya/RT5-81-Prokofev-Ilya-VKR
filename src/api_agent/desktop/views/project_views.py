@@ -221,7 +221,8 @@ def open_project_view(app,key,offset=0):
     config=app.store.project(app.project)['configuration']
     if key=='settings':
         values={**config,'label':app.store.project(app.project)['label']}
-        app.push_screen(FormDialog('Настройки проекта',PROJECT_FIELDS,values=values),app.create_project);return
+        from api_agent.desktop.views.project_setup import ProjectSetupDialog
+        app.push_screen(ProjectSetupDialog(values=values,title='Настройки проекта'),app.create_project);return
     if not Path(config['spec_path']).is_file():raise ValueError('desktop_local_spec_required')
     catalog=load_source(config['spec_path'],target=config['target']);policy=ProjectConfig.load(config['policy_path'],catalog)
     app.push_screen(OperationsDialog(catalog,policy,path=config['policy_path'] if key=='policy' else None))

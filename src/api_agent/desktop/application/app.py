@@ -1,6 +1,7 @@
 """Textual Projects/Sessions/chat. Сеть и выполнение принадлежат controller/Core."""
 from api_agent.desktop.components.controls import Button, Summary as Static
 from copy import deepcopy
+from hashlib import sha256
 import json
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -195,7 +196,9 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
 
     def action_save(self):
         if self.project and not self.loading_draft:
-            self.draft['goal']=self.query_one('#goal',TextArea).text
+            goal=self.query_one_optional('#goal',TextArea)
+            if goal is None:return
+            self.draft['goal']=goal.text
             if self.draft!=self.store.draft(self.project,self.session):self.draft_revision+=1
             self.store.save_draft(self.project,self.session,self.draft)
             self.refresh_composer()
@@ -286,9 +289,12 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
     def model_selected(self,key):
         if key:self.draft['model_id']=key;self.action_save();self.update_controls()
 
-    def project_form(self):self.push_screen(FormDialog('Добавить проект',PROJECT_FIELDS),self.create_project)
+    def project_form(self):
+        from api_agent.desktop.views.project_setup import ProjectSetupDialog
+        self.push_screen(ProjectSetupDialog(),self.create_project)
     def create_project(self,values):
         if not values:return
+        connection=values.pop('_connection',None)
         try:
             from api_agent.openapi import load_source
             from api_agent.policy.config import ProjectConfig
@@ -302,6 +308,10 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
                 values['policy_path']=str(self.store.path.parent/(project+'-policy.json'));policy.save(values['policy_path'])
             project=policy.snapshot['project_id'];label=values.pop('label') or project
             previous=self.store.project(project,required=False)
+            from api_agent.setup.credentials import project_connection
+            path=self.store.path.parent/(sha256(project.encode('utf-8')).hexdigest()+'-connection.json')
+            values=project_connection(values,previous['configuration'] if previous else {},connection,
+                path=path,scope={'project':project,'target':policy.snapshot['target'],'spec':catalog.spec_hash})
             values['image']=(previous['configuration'].get('image') if previous else None) or self.store.setting('worker_image',DEFAULT_WORKER)
             self.store.add_project(project,label,{k:v for k,v in values.items() if v})
             self.restore_sessions();sessions=self.store.sessions(project)

@@ -77,9 +77,8 @@ class ContinuationApplication:
                 health = {'ready': False, 'reason': str(error), 'request_sent': False}
             preparation['health_check'] = health
             if not health['ready']:
-                result = {'status': 'blocked', 'run_id': None, 'stop_reason': 'service_unavailable', 'health_check': health}
-                preparation.update(status='blocked', result=result); self._save(project, session_id, message_id, preparation)
-                return result
+                # D102: недоступный API исследуется обычным Run; это не новая authority.
+                health['severity'] = 'warning'
             if self.human.cancel.is_set(): raise ValueError('continuation_cancelled')
             if self.preview_continuation(project, origin_session, run_id)['preview_hash'] != preview['preview_hash']:
                 raise ValueError('continuation_preview_changed')

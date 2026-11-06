@@ -40,7 +40,7 @@ class DesktopStore:
     def close(self): self.db.close()
 
     def add_project(self, project, label, configuration):
-        allowed = {'target','spec_path','policy_path','mappings_path','image','history_path'}
+        allowed = {'target','spec_path','policy_path','mappings_path','connection_path','image','history_path'}
         if set(configuration) - allowed: raise ValueError('desktop_project_fields')
         old = self.project(project, required=False)
         if old and old['configuration'].get('target') != configuration.get('target'):

@@ -134,7 +134,11 @@ class DesktopController:
         policy = ProjectConfig.load(config['policy_path'], catalog)
         if policy.snapshot['project_id'] != project: raise ValueError('desktop_project_identity')
         mappings = {}
-        if config.get('mappings_path'):
+        if config.get('connection_path'):
+            from api_agent.setup.credentials import load_connection
+            mappings = load_connection(config['connection_path'],
+                {'project':project,'target':policy.snapshot['target'],'spec':catalog.spec_hash})
+        elif config.get('mappings_path'):
             from api_agent.goals.entry.manual_cli import _read
             mappings = _read(config['mappings_path'])
         if not isinstance(mappings,dict) or set(mappings)-{'auth','extraction','binding_rules','private_bodies','model_test_passwords','health_check','public_response_headers'}:

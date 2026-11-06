@@ -153,8 +153,9 @@ class ModelManager:
                 if expected is not None and expected.get('identity') != identity:
                     raise ValueError('model_identity_changed')
                 model = LocalModel(endpoint)
-                model.count_tokens({'messages': [{'role': 'user', 'content': 'Проверка конфигурации.'}],
+                measured = model.count_tokens({'messages': [{'role': 'user', 'content': 'Проверка конфигурации.'}],
                     'tools': TOOLS, 'tool_choice': 'required', 'model': name})
+                if measured + output > context: raise ValueError('model_context_unavailable')
                 self.current = snapshot
                 return deepcopy(snapshot)
             except (KeyError, TypeError, OSError, http.client.HTTPException) as error:

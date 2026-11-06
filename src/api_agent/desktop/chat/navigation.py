@@ -31,6 +31,7 @@ class AppSettings(PageDialog):
                     yield Label('Модели',classes='section-title')
                     yield Static('Конфигураций: '+str(len(self.store.models()))+'\nВыбор для каждой новой цели — возле отправки.',classes='field-help')
                     yield Button('Открыть каталог моделей →',id='settings-models')
+                    yield Button('Проверить окружение',id='settings-doctor')
                 with Vertical(classes='settings-group'):
                     yield Label('Оформление',classes='section-title')
                     yield Select([('Тёмная','textual-dark'),('Светлая','textual-light')],value='textual-light' if self.app.theme=='textual-light' else 'textual-dark',allow_blank=False,id='settings-theme')
@@ -44,6 +45,7 @@ class AppSettings(PageDialog):
     def on_button_pressed(self,event):
         event.stop();key=event.button.id
         if key=='settings-models':self.dismiss('models')
+        elif key=='settings-doctor':self.dismiss('doctor')
         elif key=='settings-close':self.dismiss(None)
         elif key=='settings-save':
             import re
@@ -114,7 +116,13 @@ class NavigationMixin:
         project,session=event.node.data
         if project is None:self.call_after_refresh(self.project_form)
         elif session:self.open_session(project,session)
-    def show_settings(self):self.push_screen(AppSettings(self.store),lambda value:self.show_models() if value=='models' else None)
+    def show_settings(self):
+        def selected(value):
+            if value=='models':self.show_models()
+            elif value=='doctor':
+                from api_agent.desktop.views.environment_doctor import EnvironmentDialog
+                self.push_screen(EnvironmentDialog(self.store,self.controller,project=self.project))
+        self.push_screen(AppSettings(self.store),selected)
     def action_command_palette(self):
         self.push_screen(PopupMenu('Команды',[('help','Клавиши и управление'),('screenshot','Сохранить снимок экрана'),('settings','Настройки приложения'),('quit','Выйти')],self.query_one('#command-menu')),self.command_selected)
     def command_selected(self,key):

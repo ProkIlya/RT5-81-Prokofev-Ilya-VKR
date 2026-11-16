@@ -18,6 +18,7 @@ PageDialog .page-title {height: 1; margin-bottom: 1;}
 PageDialog .page-actions, PageDialog .editor-actions {height: auto; padding-top: 1;}
 PageDialog .field-help {margin-bottom: 1; color: $text-muted;}
 FormDialog .form-field {height: auto; margin-bottom: 0; max-width: 90;}
+ProjectSetupDialog .form-field {margin-bottom: 1;}
 FormDialog .form-path {color: $accent;}
 FormDialog Input {margin-bottom: 0;}
 FormDialog .form-field Label {color: $text-muted; margin-bottom: 0;}

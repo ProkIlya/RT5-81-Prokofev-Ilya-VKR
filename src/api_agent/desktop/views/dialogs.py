@@ -35,7 +35,7 @@ class FormDialog(PageDialog):
                         yield Label(label,id='label-'+key)
                         value=self.values.get(key,default)
                         if options:yield Select(options,value=value,allow_blank=False,id='field-'+key)
-                        else:yield Input(str(value) if value is not None else '',placeholder=EXAMPLES.get(key,''),id='field-'+key,
+                        else:yield Input(str(value) if value is not None else '',placeholder=EXAMPLES.get(key,''),id='field-'+key,password=key=='password',
                             classes='form-path' if key.endswith('path') or key in {'target','endpoint','gguf','executable'} else '')
                         yield Static(HELP.get(key,''),id='help-'+key,classes='field-help')
                         yield Static('',id='error-'+key,classes='form-error')

@@ -89,6 +89,7 @@ class CatalogLimits(ChainLimits):
 class CatalogArgumentsError(ValueError):
     """Подсказка формы использует schema, никогда отклонённые значения модели."""
 
-    def __init__(self, code, hint):
+    def __init__(self, code, hint, *, parameter=None):
         self.repair_hint = hint
+        self.parameter = parameter
         super().__init__(code)

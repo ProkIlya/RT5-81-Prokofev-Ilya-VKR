@@ -8,19 +8,28 @@ class CatalogObservations:
         values = []
         login = bool(self.auth and exchange['operation_id'] == self.auth['login_operation'])
         status = (exchange.get('response') or {}).get('status')
+        if login and session.cookie is not None:
+            valid = (exchange['outcome'] == 'received'
+                and not exchange.get('truncated') and validation['contract_verdict'] == 'pass'
+                and type(status) is int and 200 <= status < 300)
+            if session.cookie.accept(valid):
+                session.state.begin_auth('configured_account')
+            elif session.state.principal is not None:
+                session.state.invalidate_auth()
+            session.run['auth_state'] = {'auth_epoch': session.state.auth_epoch, 'principal': session.state.principal}
         if (
             exchange["outcome"] == "received"
             and validation["contract_verdict"] == "pass"
             and (not login or type(status) is int and 200 <= status < 300)
         ):
-            if login:
+            if login and session.cookie is None:
                 # Actor задаёт приложение; token никогда не является его именем.
                 values.append(session.state.remember(exchange, self.auth['token_path'],
                     authenticate_as='configured_account'))
                 session.run['auth_state'] = {'auth_epoch': session.state.auth_epoch,
                                             'principal': session.state.principal}
             for path in self.extraction.get(exchange["operation_id"], {}):
-                if login and path == self.auth['token_path']: continue
+                if login and path == self.auth.get('token_path'): continue
                 values.append(session.state.remember(exchange, path))
         return {'exchange_id':exchange['id'],'runtime_values':values}
 

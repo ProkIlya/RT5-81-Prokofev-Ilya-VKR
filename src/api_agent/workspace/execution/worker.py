@@ -24,9 +24,15 @@ class Output:
     """Вывод накапливается ограниченно, а не обрезается после StringIO flood."""
     def __init__(self): self.data = bytearray(); self.truncated = False
     def write(self, text):
+        if self.truncated:
+            return len(text)
         room = max(0, 8192 - len(self.data))
-        self.data.extend(text[:room].encode('utf-8')[:room])
-        self.truncated |= len(text.encode('utf-8')) > room
+        encoded = text[:room].encode('utf-8')
+        self.truncated = len(text) > room or len(encoded) > room
+        if len(encoded) > room:
+            # В пределах лимита оставляем только целые символы UTF-8.
+            encoded = encoded[:room].decode('utf-8', errors='ignore').encode('utf-8')
+        self.data.extend(encoded)
         return len(text)
     def flush(self): pass
 

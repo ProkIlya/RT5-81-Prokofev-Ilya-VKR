@@ -2,7 +2,8 @@
 
 from copy import deepcopy
 import json
-from api_agent.openapi.parser import pointer_get
+from api_agent.openapi.parser import canonical, pointer_get
+from api_agent.validation.common import display_value
 
 
 def prioritize_root_locator(value):
@@ -13,8 +14,44 @@ def prioritize_root_locator(value):
     return {**root, **value}
 
 
+def response_feedback(broker, exchange):
+    """Связывает тело ответа с публичными параметрами запроса из OpenAPI."""
+    from api_agent.goals.checks.compiler import PRIVATE_NAMES
+
+    response = exchange.get('response') or {}
+    value = broker.safe(response.get('json'))
+    name = exchange['operation_id']
+    result = {'operation_id': name, 'status': response.get('status'), 'body': value}
+    locator_names = {p['name'] for p in broker.catalog.operations[name]['parameters']
+                     if p['in'] in {'path', 'query'} and p['name'].lower() not in PRIVATE_NAMES}
+    locator = {key: value for key, value in exchange.get('request_parameters', {}).items() if key in locator_names}
+    if locator:
+        result['request_parameters'] = display_value(broker.safe(locator))
+    if 'login_variant' in exchange:
+        result['login_variant'] = exchange['login_variant']
+    if (exchange.get('request_principal') or {}).get('mode') == 'old_epoch':
+        result['auth'] = 'revoked'
+    if len(canonical(value)) > 1024:
+        view = response_page(prioritize_root_locator(value), limit=16, max_bytes=2048)
+        result['body'] = view.pop('value')
+        result['body_view'] = view
+    return result
+
+
 def _bytes(value):
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def named_rows(value, *, max_bytes):
+    """Компактная проекция всех имён и ID небольшой коллекции."""
+    if not isinstance(value, list) or not 1 <= len(value) <= 12:
+        return None
+    if not all(isinstance(row, dict) and type(row.get('id')) in {int, str}
+               and isinstance(row.get('name'), str) and len(row['name']) <= 120
+               and len(str(row['id'])) <= 120 for row in value):
+        return None
+    rows = [{key: row[key] for key in ('id', 'name')} for row in value]
+    return rows if _bytes(rows) <= max_bytes else None
 
 
 def _child(path, key):

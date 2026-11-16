@@ -7,6 +7,8 @@ import threading
 import uuid
 
 from api_agent.bounded_json import validate_tree
+from api_agent.desktop.state.session_accounts import SessionAccounts
+from api_agent.setup.login_profile import goal_login
 from api_agent.validation import fingerprint
 
 
@@ -34,13 +36,14 @@ class DesktopStore:
         ''')
         columns={r[1] for r in self.db.execute('PRAGMA table_info(ui_sessions)')}
         if 'hidden' not in columns:self.db.execute('ALTER TABLE ui_sessions ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0')
+        self.accounts = SessionAccounts(self)
 
     def __enter__(self): return self
     def __exit__(self, *args): self.close()
     def close(self): self.db.close()
 
     def add_project(self, project, label, configuration):
-        allowed = {'target','spec_path','policy_path','mappings_path','connection_path','image','history_path'}
+        allowed = {'target','spec_path','policy_path','mappings_path','connection_path','login_schema','image','history_path'}
         if set(configuration) - allowed: raise ValueError('desktop_project_fields')
         old = self.project(project, required=False)
         if old and old['configuration'].get('target') != configuration.get('target'):
@@ -59,15 +62,21 @@ class DesktopStore:
     def projects(self):
         return [self.project(r['id']) for r in self.db.execute('SELECT id FROM ui_projects ORDER BY rowid')]
 
-    def add_session(self, project, session=None, label='Основная'):
+    def add_session(self, project, session=None, label='Основная', *, restore_legacy=False):
         self.project(project); session = session or uuid.uuid4().hex
-        with self.lock:
-            self.db.execute('INSERT OR IGNORE INTO ui_sessions(project,id,label) VALUES(?,?,?)',
-                            (project, session, str(label)[:200]))
+        with self.lock, self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            added = self.db.execute('INSERT OR IGNORE INTO ui_sessions(project,id,label) VALUES(?,?,?)',
+                                    (project, session, str(label)[:200]))
+            if added.rowcount and not restore_legacy:
+                self.db.execute('INSERT INTO ui_session_accounts(project,session) VALUES(?,?)', (project, session))
         return session
 
     def sessions(self, project, *, hidden=False):
-        return [dict(r) for r in self.db.execute('SELECT * FROM ui_sessions WHERE project=? AND hidden=? ORDER BY rowid', (project,int(hidden)))]
+        return [dict(r) for r in self.db.execute('''SELECT s.*, a.login AS account_login,
+                    a.session IS NOT NULL AS account_configured FROM ui_sessions AS s
+                    LEFT JOIN ui_session_accounts AS a ON a.project=s.project AND a.session=s.id
+                    WHERE s.project=? AND s.hidden=? ORDER BY s.rowid''', (project,int(hidden)))]
 
     def rename_session(self,project,session,label):
         if not isinstance(label,str) or not label.strip() or len(label)>200:raise ValueError('Введите название сессии (до 200 символов)')
@@ -91,6 +100,8 @@ class DesktopStore:
             raise ValueError('desktop_private_or_unknown_draft_field')
         if not isinstance(draft.get('goal'), str) or not isinstance(draft.get('cards'), list):
             raise ValueError('desktop_invalid_draft')
+        safe, _ = goal_login(draft['goal'])
+        draft = {**draft, 'goal': safe}
         with self.lock:
             self.db.execute('INSERT OR REPLACE INTO ui_drafts VALUES(?,?,?)', (project, session, encoded(draft)))
 

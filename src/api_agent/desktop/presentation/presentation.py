@@ -4,9 +4,11 @@ from rich.text import Text
 
 METHOD_COLORS={'GET':'green','HEAD':'green','POST':'bright_cyan','PUT':'yellow','PATCH':'yellow','DELETE':'red'}
 PREDICATES={'equals':'равно','not_equals':'не равно','exists':'существует','schema':'соответствует схеме',
-    'number_rounded':'число с округлением','number_within':'число с допуском','collection':'коллекция'}
+    'number_rounded':'число с округлением','number_within':'число с допуском','collection':'коллекция',
+    'value_equal':'равно полю предыдущего ответа'}
 SELECTORS={'first':'первый подходящий','last':'последний подходящий','all':'все подходящие'}
-AUTH={'any':'без ограничения авторизации','current':'текущая учётная запись','anonymous':'без авторизации'}
+AUTH={'any':'без ограничения авторизации','current':'текущая учётная запись','anonymous':'без авторизации',
+    'revoked':'отозванная авторизация после выхода'}
 LIMITS={'max_requests':'HTTP-запросы','max_steps':'Шаги агента','max_seconds':'Активное время, с',
     'max_tokens_total':'Всего токенов','max_context_tokens':'Контекст, токенов','max_output_tokens':'Ответ, токенов',
     'malformed_retries':'Повторы некорректного ответа','max_prompt_bytes':'Размер входа, байт',
@@ -33,6 +35,8 @@ def assertion_summary(item):
     if 'value' in item:label+=' '+literal(item['value'])
     if 'expected' in item:label+=' '+str(item['expected'])
     if 'tolerance' in item:label+=' ± '+str(item['tolerance'])
+    if kind=='value_equal':
+        source=item['source'];label+=' '+source['operation_id']+' → '+source['path']
     if kind=='collection':label+=' ('+('содержит' if item.get('mode')=='includes' else 'точное совпадение')+'): '+literal(item.get('rows',[]))
     return label
 
@@ -73,6 +77,8 @@ def card_summary(card,attachments=()):
     lines=['Карточка: '+(card.get('name') or card['operation_id']).strip(),
         'Ожидается HTTP '+', '.join(map(str,card['statuses']))+'; '+SELECTORS.get(card.get('selector','last'),'последний подходящий'),
         AUTH.get(card.get('auth','any'),'без ограничения авторизации'),scope_summary(card.get('where',{}),attachments)]
+    if 'login_variant' in card:
+        lines.append('Вход после смены пароля · '+('со старым паролем' if card['login_variant']=='previous' else 'с новым паролем'))
     lines.extend('  • '+assertion_summary(x) for x in card.get('assertions',[]))
     if card.get('negative'):
         n=card['negative'];lines.append('Намеренно неверный запрос: '+n['path']+' — '+{'required':'пропустить обязательное поле','schema_type':'неверный тип','enum':'значение вне списка'}.get(n['rule'],n['rule']))

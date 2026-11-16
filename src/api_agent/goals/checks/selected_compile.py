@@ -6,11 +6,12 @@ from api_agent.bounded_json import validate_tree
 from api_agent.openapi.parser import canonical
 from api_agent.validation import fingerprint, schema_issues
 from api_agent.goals.checks.compiler import AcceptedGoal, _closed, _path_schema, _schema, _number
-from api_agent.goals.checks.condition_scope import validate_where
+from api_agent.goals.checks.condition_scope import _compatible, response_reference_schema, validate_where
 from api_agent.goals.checks.selected_inputs import compile_inputs
 
 CONTRACT = 'selected-checks-v1'
 CHECKER = 'selected-evidence-v2'
+COMPARISON_CHECKER = 'selected-evidence-v3'
 
 
 def _identifier(value):
@@ -19,10 +20,11 @@ def _identifier(value):
     return value
 
 
-def _assertion(value, schema):
-    _closed(value, {'predicate'}, {'path', 'value', 'expected', 'tolerance', 'mode', 'rows'})
+def _assertion(value, schema, *, catalog=None, allowed=()):
+    _closed(value, {'predicate'}, {'path', 'value', 'expected', 'tolerance', 'mode', 'rows', 'source'})
     kind = value['predicate']
     forms = {'equals': ({'path', 'value'}, 'json_value_equals'),
+        'value_equal': ({'path', 'source'}, 'value_equal'),
         'not_equals': ({'path', 'value'}, 'json_value_not_equals'),
         'exists': ({'path'}, 'json_field_exists'), 'schema': (set(), 'response_schema'),
         'number_rounded': ({'path', 'expected'}, 'json_number_rounded'),
@@ -35,6 +37,10 @@ def _assertion(value, schema):
     field = _path_schema(schema, params['path']) if 'path' in params else schema
     if kind in {'equals', 'not_equals'}:
         if field.get('type') in {'object', 'array'} or schema_issues(params['value'], field):
+            raise ValueError('selected_invalid_value')
+    if kind == 'value_equal':
+        source_field = response_reference_schema(catalog, allowed, params['source'])
+        if not _compatible(source_field, field):
             raise ValueError('selected_invalid_value')
     if kind.startswith('number_'):
         if field.get('type') not in {'integer', 'number'}: raise ValueError('selected_invalid_number')
@@ -90,7 +96,7 @@ def compile_selected(catalog, config, document, *, source='user_import', version
     conditions, observations, normalized, ids = [], [], [], set()
     for card in cards:
         _closed(card, {'id', 'operation_id', 'statuses'},
-            {'assertions', 'where', 'selector', 'auth', 'enabled', 'name', 'negative'})
+            {'assertions', 'where', 'selector', 'auth', 'enabled', 'name', 'negative', 'login_variant'})
         key = _identifier(card['id'])
         if key in ids: raise ValueError('selected_duplicate_card')
         ids.add(key)
@@ -103,7 +109,7 @@ def compile_selected(catalog, config, document, *, source='user_import', version
             raise ValueError('selected_invalid_statuses')
         statuses = sorted(set(statuses))
         selector, auth = card.get('selector', 'last'), card.get('auth', 'any')
-        if selector not in {'first', 'last', 'all'} or auth not in {'any', 'current', 'anonymous'}:
+        if selector not in {'first', 'last', 'all'} or auth not in {'any', 'current', 'anonymous', 'revoked'}:
             raise ValueError('selected_unsupported_scope')
         if auth == 'current' and not catalog.operations[name]['security']:
             raise ValueError('selected_current_auth_not_declared')
@@ -111,6 +117,19 @@ def compile_selected(catalog, config, document, *, source='user_import', version
         if not isinstance(label, str) or len(label) > 200: raise ValueError('selected_invalid_name')
         observation = {'id': key, 'operation_id': name, 'where': validate_where(catalog,
             config.snapshot['operations'], name, card.get('where', {})), 'selector': selector, 'auth': auth}
+        if auth == 'revoked':
+            op = catalog.operations[name]
+            if (op['method'] != 'GET' or not op['security'] or {} in op['security'] or statuses != [401]
+                    or config.snapshot['mode'] != 'TEST' or not config.snapshot['resettable']
+                    or any(isinstance(v, dict) for v in observation['where'].get('parameters', {}).values())):
+                raise ValueError('selected_revoked_scope')
+        if 'login_variant' in card:
+            variant = card['login_variant']
+            if (variant not in ('previous', 'replacement') or catalog.operations[name]['method'] != 'POST'
+                    or auth != 'any' or config.snapshot['mode'] != 'TEST' or not config.snapshot['resettable']
+                    or (statuses != [401] if variant == 'previous' else not all(200 <= s < 300 for s in statuses))):
+                raise ValueError('selected_login_variant')
+            observation['login_variant'] = variant
         assertions = card.get('assertions', [])
         if not isinstance(assertions, list) or len(assertions) > 16: raise ValueError('selected_assertion_limit')
         status_condition = {'id': key + '_status', 'requirement_id': 'selected', 'observation_id': key,
@@ -118,7 +137,7 @@ def compile_selected(catalog, config, document, *, source='user_import', version
         schema = _schema(catalog, {'id': key, 'operation_id': name}, [{**status_condition, 'slot': key}])
         compiled = [status_condition]
         for index, assertion in enumerate(assertions, 1):
-            predicate, params = _assertion(assertion, schema)
+            predicate, params = _assertion(assertion, schema, catalog=catalog, allowed=config.snapshot['operations'])
             compiled.append({**deepcopy(status_condition), 'id': key + '_' + str(index),
                 'predicate': predicate, 'parameters': params})
         item = {**observation, 'statuses': statuses, 'assertions': deepcopy(assertions), 'name': label, 'enabled': card.get('enabled', True)}
@@ -131,7 +150,10 @@ def compile_selected(catalog, config, document, *, source='user_import', version
     if len(conditions) > 64: raise ValueError('selected_condition_limit')
     attachments = document.get('attachments', [])
     if not isinstance(attachments, list) or len(attachments) > 8: raise ValueError('selected_attachment_limit')
-    snapshot = {'contract': CONTRACT, 'checker_version': CHECKER, 'version': version,
+    modern = (any(c['predicate'] == 'value_equal' for c in conditions)
+              or any(o['auth'] == 'revoked' or 'login_variant' in o for o in observations))
+    checker = COMPARISON_CHECKER if modern else CHECKER
+    snapshot = {'contract': CONTRACT, 'checker_version': checker, 'version': version,
         'goal': goal, 'goal_hash': fingerprint(goal), 'mode': mode, 'project_id': config.snapshot['project_id'],
         'target': config.snapshot['target'], 'spec_hash': catalog.spec_hash, 'config_hash': fingerprint(config.snapshot),
         'config_version': config.snapshot['version'], 'source': source, 'cards': normalized,

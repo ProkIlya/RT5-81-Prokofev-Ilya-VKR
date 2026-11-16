@@ -36,7 +36,7 @@ def origin_allows_recovery_login(workflow, history, project, run_id):
     if not isinstance(logout, list) or any(not isinstance(name, str) or name not in operations for name in logout): return False
     original_issuer = _endpoint(operations.get(issuer))
     current_issuer = _endpoint(workflow.catalog.operations.get(workflow.auth['login_operation']))
-    if original_issuer is None or original_issuer != current_issuer or token != workflow.auth['token_path']: return False
+    if original_issuer is None or original_issuer != current_issuer or token != workflow.auth.get('token_path'): return False
     names = {e['operation_id'] for e in run['exchanges'] if e.get('effect_status') == 'uncertain'}
     if run.get('pending_mutation'): names.add(run['pending_mutation'].get('operation_id'))
     if not names or names & {issuer, *logout}: return False
@@ -52,7 +52,7 @@ def recovery_login_allowed(workflow, history, project, unresolved, operation):
     auth = workflow.auth or {}
     login = auth.get('login_operation')
     if (not login or operation != login or login in auth.get('logout_operations', [])
-            or workflow.extraction.get(login, {}).get(auth['token_path']) != {'type': 'string', 'secret': True}):
+            or workflow.extraction.get(login, {}).get(auth.get('token_path')) != {'type': 'string', 'secret': True}):
         return False
     return all(origin_allows_recovery_login(workflow, history, project, run_id) for run_id in unresolved)
 
@@ -90,8 +90,9 @@ def observe_auth(workflow, session, exchange, validation):
         cause = response.get('auth_error', 'unknown')
         feedback['last_failure'] = {'run_id': run['run_id'], 'exchange_id': exchange['id'],
             'status': status, 'cause': cause, 'mode': principal.get('mode'), 'observed_at': time.time()}
-        if (status == 401 and cause == 'invalid_token' and principal.get('mode') == 'authenticated'
+        if (status == 401 and (cause == 'invalid_token' or session.cookie is not None) and principal.get('mode') == 'authenticated'
                 and principal.get('auth_epoch') == session.state.auth_epoch):
+            if session.cookie is not None:session.cookie.clear()
             session.state.invalidate_auth()
             run['auth_state'] = {'auth_epoch': session.state.auth_epoch, 'principal': session.state.principal}
         feedback['guidance'] = 'The ordinary agent loop may choose login/refresh/ask; preserve the original failure and negative auth intent.'

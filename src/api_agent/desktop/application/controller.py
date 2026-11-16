@@ -20,6 +20,9 @@ from api_agent.policy.config import ProjectConfig
 from api_agent.storage import SQLiteHistory
 from api_agent.workspace.sdk import build_sdk
 from api_agent.desktop.state.models import ModelManager
+from api_agent.desktop.application.login import connection_scope, project_mappings, run_mappings
+from api_agent.goals.entry.code_workflow import code_storage_metadata
+from api_agent.setup.login_profile import explicit_login, goal_login
 
 
 class InteractionChannel:
@@ -128,19 +131,15 @@ class DesktopController:
         with self.history(project) as history:
             return history.exchange_section(project, session, run_id, exchange_id, **options)
 
-    def _application(self, project, snapshot, history, *, limits=None):
+    def _application(self, project, snapshot, history, *, limits=None, session=None, temporary=None):
         config = self.store.project(project)['configuration']
         catalog = load_source(config['spec_path'], target=config['target'])
         policy = ProjectConfig.load(config['policy_path'], catalog)
         if policy.snapshot['project_id'] != project: raise ValueError('desktop_project_identity')
-        mappings = {}
-        if config.get('connection_path'):
-            from api_agent.setup.credentials import load_connection
-            mappings = load_connection(config['connection_path'],
-                {'project':project,'target':policy.snapshot['target'],'spec':catalog.spec_hash})
-        elif config.get('mappings_path'):
-            from api_agent.goals.entry.manual_cli import _read
-            mappings = _read(config['mappings_path'])
+        base = project_mappings(config, connection_scope(policy, catalog))
+        if not isinstance(base, dict):raise ValueError('selected_invalid_mappings')
+        mappings = run_mappings(self.store, catalog, policy, config, session, temporary, base)
+        project_metadata = code_storage_metadata(base.get('extraction', {}), base.get('binding_rules', {}), base.get('auth'))
         if not isinstance(mappings,dict) or set(mappings)-{'auth','extraction','binding_rules','private_bodies','model_test_passwords','health_check','public_response_headers'}:
             raise ValueError('selected_invalid_mappings')
         passwords = mappings.pop('model_test_passwords', None)
@@ -160,7 +159,7 @@ class DesktopController:
             mappings=mappings, limits=limits, token_counter=LocalModel(snapshot['endpoint']).count_tokens,
             current_config=lambda:ProjectConfig.load(config['policy_path'], catalog),
             trace_sink=self._trace, event_sink=lambda event:self._notify('event', event),
-            model_test_passwords=passwords)
+             model_test_passwords=passwords, project_metadata=project_metadata)
 
     def _trace(self, run):
         self.current_run = run['run_id']; self._notify('trace', {'project':run['project_id'],
@@ -170,6 +169,9 @@ class DesktopController:
         with self.lock:
             if self.busy: raise ValueError('desktop_run_busy')
             if not origin and not draft.get('model_id'): raise ValueError('model_selection_required')
+            goal, temporary = goal_login(draft.get('goal', '')) if not origin else ('', None)
+            if not origin and temporary is None and explicit_login(draft['goal']):
+                raise ValueError('connection_goal_credentials_missing')
             self.cancel_event.clear(); self.channel = InteractionChannel(self.cancel_event, self._notify)
             self.active_scope = (project, session)
             if origin:
@@ -188,10 +190,10 @@ class DesktopController:
                     from api_agent.storage.checkpoints import validate_checkpoint
                     limits = CatalogLimits(**validate_checkpoint(history, parent)['limits'])
                 else: limits = None
-                app = self._application(project, snapshot, history, limits=limits)
+                app = self._application(project, snapshot, history, limits=limits, session=session, temporary=temporary)
                 if origin: preview = app.preview_continuation(project, *origin); document = None
                 else:
-                    document = {'schema_version':'selected-checks-v1', 'goal':draft['goal'],
+                    document = {'schema_version':'selected-checks-v1', 'goal':goal,
                         'mode':'testing' if any(c.get('enabled', True) for c in draft['cards']) else 'research',
                         'cards':deepcopy(draft['cards']), 'attachments':deepcopy(draft.get('attachments', []))}
                     if draft.get('input_slots'): document['input_slots'] = deepcopy(draft['input_slots'])

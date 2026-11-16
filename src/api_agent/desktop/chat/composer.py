@@ -8,6 +8,7 @@ from api_agent.desktop.builder.constructor_widgets import EditorDialog
 from api_agent.desktop.presentation.presentation import conditions_summary, LIMITS, error_text
 from api_agent.execution.contracts import CatalogLimits
 from api_agent.desktop.presentation.ui_errors import read_feedback
+from api_agent.setup.login_profile import goal_login
 
 
 class ComposerMixin:
@@ -73,7 +74,7 @@ class DraftDetails(EditorDialog):
         with Vertical(classes='editor-shell'):
             yield Label('Сводка новой цели',classes='page-title')
             with VerticalScroll(classes='editor-body'):
-                yield Static('Цель: '+self.owner.draft.get('goal',''),markup=False)
+                yield Static('Цель: '+goal_login(self.owner.draft.get('goal',''))[0],markup=False)
                 model=self.owner.store.model(self.owner.draft.get('model_id'),required=False)
                 yield Static('Модель: '+(model['profile']['name'] if model else 'не выбрана'),markup=False)
                 with Collapsible(title='Проверки',collapsed=False):

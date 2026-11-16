@@ -163,10 +163,17 @@ class CatalogSession(PolicySession):
         """Обычный путь строгий; versioned negative admission уточняет один issue."""
         return schema_issues(value, schema)
 
+    def revoked_credential(self, args, supplied):
+        return None
+
+    def login_body(self):
+        return deepcopy(self.workflow.auth['body']), None
+
     def __init__(self, target, catalog, workflow, run, limits):
         super().__init__(target, catalog, workflow, run, limits)
         self._bound_inputs = {}
         self._selection_anchors = {}
+        self.uncertain_review_start = None
         run["run_catalog"] = {
             "selection_scopes": deepcopy(workflow.selection_scopes),
             "allowed_ids": list(workflow.allowed),
@@ -181,9 +188,7 @@ class CatalogSession(PolicySession):
 
     def admit(self, args):
         self.remaining()
-        if self.uncertain:
-            from api_agent.policy.config import PolicyStop
-
+        if self.uncertain and not self.uncertain_read_allowed(args['operation_id']):
             raise PolicyStop("uncertain_write")
         if self.requests >= self.max_requests:
             raise RequestLimitExceeded("request_limit")
@@ -267,7 +272,9 @@ class CatalogSession(PolicySession):
                     + key
                     + " must have JSON type "
                     + str(p["schema"]["type"])
-                    + ". Integers are numbers, not quoted strings. Use bindings for runtime references.",
+                    + ". Pass integers as JSON numbers. Use an observed value of the declared type."
+                    + ("" if p["required"] else " You can omit this optional argument when the goal does not need it."),
+                    parameter=(p['in'], p['name']),
                 )
             text = str(value).lower() if type(value) is bool else str(value)
             if (
@@ -289,10 +296,11 @@ class CatalogSession(PolicySession):
             path += "?" + urlencode(query)
         body = args.get("body")
         auth = self.workflow.auth
+        self._login_variant = None
         if auth and name == auth["login_operation"]:
             if body is not None:
                 raise ValueError("credential_body_is_private")
-            body = deepcopy(auth["body"])
+            body, self._login_variant = self.login_body()
         if "requestBody" in op:
             request = op["requestBody"]
             if body is None and request.get("required"):
@@ -321,28 +329,29 @@ class CatalogSession(PolicySession):
         if encoded and len(encoded) > 16384:
             raise ValueError("request_body_limit")
         self._headers = parameter_headers
-        mode = self.workflow.request_mode(name, slot)
+        revoked = self.revoked_credential(args, supplied)
+        mode = 'old_epoch' if revoked is not None else self.workflow.request_mode(name, slot)
         self._request_principal = {'mode': mode, 'auth_epoch': self.state.auth_epoch,
                                    'actor': None}
-        if mode == 'authenticated':
-            ref = args.get("credential_ref")
-            if ref is None:
-                raise CatalogArgumentsError("credential_ref_required", "credential_ref is required. First execute " + auth["login_operation"] + " with operation_id only; application supplies its private body. Then use the issued credential_ref. Never invent a token.")
-            record = next((v for v in self.state.public() if v["ref"] == ref), None)
-            if (
-                record is None
-                or record["operation_id"] != auth["login_operation"]
-                or record["path"] != auth["token_path"]
-                or record.get('auth_epoch') != self.state.auth_epoch
-                or record.get('principal') != self.state.principal
-                or self.state.principal is None
-            ):
-                raise ValueError("auth_reference_denied")
-            self._request_principal['actor'] = self.state.principal
-            self._headers = {**parameter_headers,
-                "Authorization": "Bearer "
-                + self.state.resolve(ref, "string", secret=True)
-            }
+        if revoked is not None:
+            self._request_principal.update(actor=revoked['principal'], auth_epoch=revoked['auth_epoch'])
+            self._headers = {**parameter_headers, 'Authorization': 'Bearer '
+                + self.state.resolve(revoked['ref'], 'string', secret=True)}
+        elif mode == 'authenticated':
+            if self.cookie is not None:
+                if self.state.principal is None or 'credential_ref' in args:
+                    raise ValueError('auth_reference_denied')
+                from api_agent.execution.session_cookie import cookie_schemes
+                header = self.cookie.header(self.target + path) if self.cookie.name in cookie_schemes(op) else None
+                if not header:
+                    if not self.cookie.active:
+                        self.state.invalidate_auth()
+                        self.run['auth_state'] = {'auth_epoch': self.state.auth_epoch, 'principal': self.state.principal}
+                    raise ValueError('auth_reference_denied')
+                self._request_principal['actor'] = self.state.principal
+                self._headers = {**parameter_headers, 'Cookie': header}
+            else:
+                self._headers = self._bearer_headers(auth, args, parameter_headers)
         elif "credential_ref" in args:
             raise ValueError("unexpected_auth_reference")
         from api_agent.execution.admission import admit_conditions
@@ -356,6 +365,35 @@ class CatalogSession(PolicySession):
             raise ValueError("duplicate_semantic_action")
         self._request_parameters = deepcopy(supplied)
         return self.authorize(args, (name, op, path, encoded, None, action))
+
+    @property
+    def uncertain_reads_remaining(self):
+        start = self.uncertain_review_start
+        return 0 if start is None else max(0, 2 - (self.requests - start))
+
+    def uncertain_read_allowed(self, operation_id):
+        grant = self.pinned['operations'].get(operation_id, {})
+        return (self.uncertain_reads_remaining > 0 and operation_id in self.workflow.allowed
+                and self.catalog.operations[operation_id]['method'] == 'GET'
+                and grant.get('risk') in {'A', 'ALLOW'})
+
+    def _bearer_headers(self, auth, args, parameter_headers):
+        ref = args.get("credential_ref")
+        if ref is None:
+            raise CatalogArgumentsError("credential_ref_required", "credential_ref is required. First execute " + auth["login_operation"] + " with operation_id only; application supplies its private body. Then use the issued credential_ref. Never invent a token.")
+        record = next((v for v in self.state.public() if v["ref"] == ref), None)
+        if (
+            record is None
+            or record["operation_id"] != auth["login_operation"]
+            or record["path"] != auth["token_path"]
+            or record.get('auth_epoch') != self.state.auth_epoch
+            or record.get('principal') != self.state.principal
+            or self.state.principal is None
+        ):
+            raise ValueError("auth_reference_denied")
+        self._request_principal['actor'] = self.state.principal
+        return {**parameter_headers,
+            "Authorization": "Bearer " + self.state.resolve(ref, "string", secret=True)}
 
     def execute(self, args):
         exchange = super().execute(args)
@@ -374,7 +412,10 @@ class CatalogSession(PolicySession):
         ):
             exchange["request"].pop("json", None)
             exchange["request"]["credential_body_omitted"] = True
+            if self._login_variant is not None:
+                exchange['login_variant'] = self._login_variant
         if name in (self.workflow.auth or {}).get('logout_operations', []):
+            if self.cookie is not None:self.cookie.clear()
             self.state.invalidate_auth()
             self.run['auth_state'] = {'auth_epoch': self.state.auth_epoch, 'principal': self.state.principal}
         return exchange

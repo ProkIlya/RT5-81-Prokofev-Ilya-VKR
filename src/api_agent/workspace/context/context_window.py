@@ -4,6 +4,7 @@ import json
 
 from api_agent.agent.response_views import response_page
 from api_agent.agent.resilience import BudgetViolation
+from api_agent.workspace.context.run_memory import tighten_working_memory
 
 
 def _groups(messages):
@@ -36,6 +37,26 @@ def _count(counter, payload):
     return value
 
 
+def _project_completed_writes(state, calls):
+    by_id = {call.get('exchange_id'): call for call in calls if 'exchange_id' in call}
+    keep, covered = [], []
+    for write in state.get('completed_writes', []):
+        exchange_id = write.get('exchange_id')
+        call = by_id.get(exchange_id, {})
+        request = call.get('request_body', {})
+        response = call.get('response', {})
+        if (not call or any(write.get(key) != call.get(key) for key in ('operation_id', 'status', 'parameters'))
+                or ('body' in write and (not request.get('complete') or write['body'] != request.get('value')))
+                or ('response_body' in write and (not response.get('complete') or 'value' not in response
+                    or write['response_body'] != response['value']))):
+            keep.append(write)
+        else:
+            covered.append(exchange_id)
+    if covered:
+        state['completed_writes'] = keep
+        state['completed_write_history'] = {'source': 'working_memory.api_calls', 'exchange_ids': covered}
+
+
 def _project_dynamic_state(prefix, memory):
     """История вызовов уже присутствует в полной рабочей проекции один раз."""
     changed = False
@@ -50,6 +71,7 @@ def _project_dynamic_state(prefix, memory):
                 or len(state['api_calls']) != len(memory['api_calls'])): continue
         state.pop('api_calls')
         state['api_call_history'] = {'source':'working_memory.api_calls','complete':True}
+        _project_completed_writes(state, memory['api_calls'])
         message['content'] = json.dumps(task, ensure_ascii=False, separators=(',', ':'))
         changed = True
     return changed
@@ -61,10 +83,37 @@ def _project_results(groups, saved_memory):
         for message in group[1:]:
             content = message.get('content', '')
             if len(content.encode('utf-8')) <= 2048:
+                if _reference_duplicate_check(message, saved_memory):
+                    projected.add(id(message))
                 continue
             if _project_result(message, content, saved_memory):
                 projected.add(id(message))
     return projected
+
+
+def _reference_duplicate_check(message, memory):
+    """Ссылка заменяет только совпадающие части текущей сводки условий."""
+    try:
+        value = json.loads(message['content'])
+    except (ValueError, TypeError):
+        return False
+    check = value.get('check') if isinstance(value, dict) else None
+    saved = memory.get('check')
+    if not isinstance(check, dict) or not isinstance(saved, dict) or 'conditions' not in check:
+        return False
+    keys = ('verdict', 'conditions', 'answer_fields')
+    if any(key in check and (key not in saved or check[key] != saved[key]) for key in keys):
+        return False
+    extra = {key: item for key, item in check.items() if key not in keys}
+    del value['check']
+    if extra:
+        value['check'] = extra
+    value['check_ref'] = 'working_memory.check'
+    content = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    if len(content.encode()) >= len(message['content'].encode()):
+        return False
+    message['content'] = content
+    return True
 
 
 def _project_result(message, content, saved_memory):
@@ -79,9 +128,7 @@ def _project_result(message, content, saved_memory):
         value = {key: item for key, item in value.items() if key not in replaced}
     shortened = json.dumps({'context_truncated': True,
         'original_bytes': len(content.encode('utf-8')), 'projection': response_page(value, max_bytes=1024),
-        'sections_in_working_memory': replaced,
-        'hint': 'Inspect complete responses in assigned Python variables using execute_code; '
-            'do not repeat completed writes to recover output.'},
+        'sections_in_working_memory': replaced},
         ensure_ascii=False, separators=(',', ':'))
     if len(shortened.encode('utf-8')) >= len(content.encode('utf-8')):
         return False
@@ -126,10 +173,8 @@ def compact_payload(payload, *, prefix_count, memory, counter, context_tokens):
             removed_messages += len(groups[removed - 1])
         retained = [message for group in groups[removed:] for message in group]
         projected_count = sum(id(message) in projected for message in retained)
-        history = {'removed_tool_groups': removed_tools, 'tool_results_truncated': projected_count,
-            'dynamic_api_history_projected': dynamic_projected, 'full_evidence_retained': True}
-        memory_message = {'role': 'user', 'content': json.dumps({'working_memory': saved_memory,
-            'history_projection': history}, ensure_ascii=False, separators=(',', ':'))}
+        memory_message = {'role': 'user', 'content': json.dumps({'working_memory': saved_memory},
+            ensure_ascii=False, separators=(',', ':'))}
         candidate = {**payload, 'messages': [*prefix, memory_message, *retained]}
         after = _count(counter, candidate)
         if after < best_info['input_tokens_after']:
@@ -137,7 +182,31 @@ def compact_payload(payload, *, prefix_count, memory, counter, context_tokens):
             best_info = {**info, 'input_tokens_after': after, 'removed_message_groups': removed,
                 'removed_messages': removed_messages, 'removed_tool_groups': removed_tools,
                 'tool_results_truncated': projected_count, 'above_soft_limit': after > threshold,
-                'exchange_ids': evidence}
+                'exchange_ids': evidence, 'dynamic_api_history_projected': dynamic_projected}
         if after <= threshold:
             break
+    if best_info['input_tokens_after'] + output_reserve > context_tokens:
+        tighter = tighten_working_memory(saved_memory)
+        if tighter != saved_memory:
+            tight_prefix = deepcopy(payload['messages'][:prefix_count])
+            tight_dynamic = _project_dynamic_state(tight_prefix, tighter)
+            retained = [message for group in groups[last_tool:] for message in group]
+            memory_message = {'role': 'user', 'content': json.dumps({'working_memory': tighter},
+                ensure_ascii=False, separators=(',', ':'))}
+            candidate = {**payload, 'messages': [*tight_prefix, memory_message, *retained]}
+            after = _count(counter, candidate)
+            if after < best_info['input_tokens_after']:
+                best = candidate
+                best_info = {**info, 'input_tokens_after': after, 'removed_message_groups': last_tool,
+                    'removed_messages': sum(len(group) for group in groups[:last_tool]),
+                    'removed_tool_groups': sum(bool(group[0].get('tool_calls')) for group in groups[:last_tool]),
+                    'tool_results_truncated': sum(id(message) in projected for message in retained),
+                    'above_soft_limit': after > threshold, 'exchange_ids': evidence,
+                    'dynamic_api_history_projected': tight_dynamic, 'tight_working_memory': True}
+    available = context_tokens - best_info['input_tokens_after']
+    if evidence and 384 <= available < output_reserve:
+        candidate = {**best, 'max_tokens': available}
+        after = _count(counter, candidate)
+        if after + available <= context_tokens:
+            return candidate, {**best_info, 'input_tokens_after': after, 'output_reserve': available}
     return best, best_info

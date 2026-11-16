@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from textual import work
 from api_agent.desktop.views.dialogs import PreviewDialog
+from api_agent.setup.login_profile import goal_login
 from api_agent.validation import fingerprint
 
 
@@ -18,7 +19,7 @@ class SubmissionMixin:
     def prepare_send(self,project,session,draft,origin=None):
         self.action_save()
         if origin is None:
-            self.pending_goal={'scope':(project,session),'goal':draft.get('goal','')}
+            self.pending_goal={'scope':(project,session),'goal':goal_login(draft.get('goal',''))[0]}
             self.refresh_messages()
         token=Submission((project,session),self.draft_revision,
             fingerprint(self.store.draft(project,session)),fingerprint(self.store.project(project)['configuration']))
@@ -30,13 +31,24 @@ class SubmissionMixin:
             or token.scope!=(self.project,self.session) or token.revision!=self.draft_revision):return False
         if fingerprint(self.store.draft(*token.scope))!=token.draft_hash:return False
         self.action_save()
-        return (token.revision==self.draft_revision and fingerprint(self.draft)==token.draft_hash
+        return (token.revision==self.draft_revision and fingerprint(self.store.draft(*token.scope))==token.draft_hash
             and fingerprint(self.store.project(token.scope[0])['configuration'])==token.project_hash)
 
     def close_submission(self,prepared,token):
         prepared.close()
         if self.prepared is prepared:self.prepared=None
         if self.pending_submission is token:self.pending_submission=None
+
+    def clear_submitted_password(self):
+        token=self.pending_submission
+        if not token or token.scope!=(self.project,self.session) or token.revision!=self.draft_revision:
+            return
+        from textual.widgets import TextArea
+        editor=self.query_one('#goal',TextArea)
+        safe,account=goal_login(editor.text)
+        if account is not None:
+            editor.text=safe
+            self.action_save()
 
     @work(thread=True,exclusive=True,group='prepare')
     def prepare_submission(self,project,session,draft,origin,token):

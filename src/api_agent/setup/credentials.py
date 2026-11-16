@@ -25,7 +25,7 @@ def _credential_schema(schema, path):
     return schema
 
 
-def compile_connection(catalog, operation, token_path, body):
+def compile_connection(catalog, operation, token_path, body, *, cookie_name=None):
     """Операция/путь выбраны человеком; пароль и токен не выводятся из имён."""
     op = catalog.operations.get(operation)
     if op is None or op['method'] != 'POST' or any(p.get('required') for p in op['parameters']):
@@ -35,11 +35,18 @@ def compile_connection(catalog, operation, token_path, body):
         raise ValueError('connection_body_invalid')
     successes = [int(s) for s in op['responses'] if s.isdigit() and 200 <= int(s) < 300]
     if not successes: raise ValueError('connection_token_path_invalid')
+    if len(canonical(body)) > 8192: raise ValueError('connection_body_invalid')
+    if cookie_name is not None:
+        from api_agent.execution.session_cookie import cookie_name_valid, cookie_schemes
+        if (token_path is not None or not cookie_name_valid(cookie_name)
+                or not any(cookie_name in cookie_schemes(item) for item in catalog.operations.values())):
+            raise ValueError('connection_cookie_invalid')
+        return {'auth': {'login_operation': operation, 'cookie_name': cookie_name, 'body': body,
+                         'public_body_fields': []}, 'extraction': {}}
     response = op['responses'][str(min(successes))].get('content', {}).get('application/json', {}).get('schema', {})
     try: field = _credential_schema(response, token_path)
     except ValueError: raise ValueError('connection_token_path_invalid') from None
     if field.get('type') != 'string': raise ValueError('connection_token_path_invalid')
-    if len(canonical(body)) > 8192: raise ValueError('connection_body_invalid')
     return {'auth': {'login_operation': operation, 'token_path': token_path, 'body': body,
                       'public_body_fields': []},
             'extraction': {operation: {token_path: {'type': 'string', 'secret': True}}}}

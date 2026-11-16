@@ -1,17 +1,20 @@
 """Безопасное текущее состояние одного Run; не долговременные Project facts."""
 from copy import deepcopy
+from collections import defaultdict
 
-from api_agent.agent.response_views import response_page
+from api_agent.agent.response_views import named_rows, response_page
 from api_agent.goals.checks.compiler import check_goal
-from api_agent.openapi.model import canonical
 from api_agent.storage.checkpoints import retained_scalars
+from api_agent.validation import fingerprint
 
 
-def _page(value, max_bytes):
+def _page(value, max_bytes, *, preserve_named_rows=False):
     """Из большого ответа переносим ограниченный набор публичных полей."""
     page = response_page(value, max_bytes=max_bytes)
     if page['complete']:
         return {'value': page['value'], 'complete': True}
+    if preserve_named_rows and (rows := named_rows(value, max_bytes=max_bytes)) is not None:
+        return {'named_rows': rows, 'complete': False}
     scalars = retained_scalars(value)
     paths = sorted(scalars, key=_field_order)[:4]
     return {'fields': [{'path': path, 'value': scalars[path]} for path in paths], 'complete': False}
@@ -52,16 +55,18 @@ def project_recovery(memory):
     return projected
 
 
-def _deduplicate_reads(calls, operations):
-    """Равная публичная проекция чтения видна один раз в пределах auth scope."""
+def read_request_identity(exchange):
+    return fingerprint([exchange['operation_id'], exchange.get('request'),
+                        exchange.get('request_parameters'), exchange.get('request_principal')])
+
+
+def _deduplicate_reads(calls, identities):
+    """Связывать только равные ответы, даже если проекции разных тел совпали."""
     seen = {}
     for call in reversed(calls):
-        operation = call['operation_id']
-        if (call['has_error'] or 'response' not in call
-                or operations[operation]['method'] not in {'GET', 'HEAD'}):
+        identity = identities.get(call['exchange_id'])
+        if identity is None:
             continue
-        identity = canonical([operation, call['status'], call['parameters'],
-            call['request_principal'], call['response']])
         if identity in seen:
             call['response_projection_ref'] = seen[identity]
             del call['response']
@@ -69,11 +74,51 @@ def _deduplicate_reads(calls, operations):
             seen[identity] = call['exchange_id']
 
 
+def _project_principals(calls):
+    groups = defaultdict(list)
+    for call in calls:
+        groups[fingerprint(call['request_principal'])].append(call)
+    principals = {}
+    for group in groups.values():
+        if len(group) < 3:
+            continue
+        reference = len(principals) + 1
+        principals[str(reference)] = group[0]['request_principal']
+        for call in group:
+            call.pop('request_principal')
+            call['principal_ref'] = reference
+    return {'request_principals': principals} if principals else {}
+
+
+def tighten_working_memory(memory):
+    """Плотная проекция под жёсткий предел окна. Сохраняет запросы, ошибки и источники."""
+    result = deepcopy(memory)
+    defaults = {'contract_verdict': 'pass', 'intent_verdict': 'not_checked', 'task_postcondition': False}
+    for call in result.get('api_calls', []):
+        if call.get('has_error'):
+            continue
+        validation = {name: value for name, value in call.get('validation', {}).items()
+                      if name not in defaults or defaults[name] != value}
+        if 'validation' in call:
+            if validation:
+                call['validation'] = validation
+            else:
+                call.pop('validation')
+        if call.get('outcome') == 'received':
+            call.pop('outcome')
+        response = call.get('response') or {}
+        if response.get('complete') and 'value' in response:
+            call['response'] = _page(response['value'], 512, preserve_named_rows=True)
+    return result
+
+
 def memory_snapshot(workflow, run, session, safe):
     """Приложение сообщает реальные scopes и handles; ничего не исполняет."""
     validations = {v['exchange_id']:v for v in run.get('validations', [])}
     calls = []
-    for exchange in run['exchanges']:
+    identities = {}
+    exchanges = run['exchanges']
+    for index, exchange in enumerate(exchanges):
         response = exchange.get('response') or {}
         request = exchange.get('request') or {}
         validation = {k:v for k,v in validations.get(exchange['id'], {}).items()
@@ -93,27 +138,38 @@ def memory_snapshot(workflow, run, session, safe):
         if 'json' in request:
             item['request_body'] = _page(session.state.redact(request['json']), 256)
         if 'json' in response:
-            item['response'] = _page(session.state.redact(response['json']), 512)
+            is_read = (not has_error and response.get('json_valid')
+                       and workflow.catalog.operations[exchange['operation_id']]['method'] in {'GET', 'HEAD'})
+            if is_read:
+                identities[exchange['id']] = fingerprint([read_request_identity(exchange), status, response['json']])
+            # При сжатии последняя небольшая выборка остаётся доступна целиком.
+            limit = 2048 if is_read and index == len(exchanges) - 1 else 512
+            item['response'] = _page(session.state.redact(response['json']), limit, preserve_named_rows=is_read)
             if exchange.get('truncated'):
                 item['response']['complete'] = False
         calls.append(item)
-    _deduplicate_reads(calls, workflow.catalog.operations)
+    _deduplicate_reads(calls, identities)
     check = check_goal(workflow.accepted, workflow.catalog, run)
     if 'conditions' in check:
         check['conditions'] = [{k:c[k] for k in
             (('condition_id','verdict') if c['verdict']=='PASS'
              else ('condition_id','verdict','expected','actual'))} for c in check['conditions']]
-    errors = []
+    errors = {}
     for step in run.get('steps', []):
         observation = step.get('observation') or {}
-        if observation.get('error') or observation.get('status') == 'error':
-            errors.append({'step':step['index'], 'error':response_page(observation, max_bytes=256)})
+        error = observation.get('error') or ('error' if observation.get('status') == 'error' else None)
+        if error:
+            diagnostic = {'error': error, **{key: observation[key] for key in
+                ('error_line', 'error_detail', 'preflight', 'expected_request') if observation.get(key) is not None}}
+            page = response_page(diagnostic, max_bytes=512)
+            entry = errors.setdefault(fingerprint(diagnostic), {'steps': [], **page['value']})
+            entry['steps'].append(step['index'])
     return safe({'auth_session':{'authenticated':session.state.principal is not None,
         'principal':session.state.principal, 'auth_epoch':session.state.auth_epoch},
-        'runtime_values':session.state.public(), 'api_calls':calls, 'tool_errors':errors,
+        'runtime_values':session.state.public(), 'api_calls':calls, 'tool_errors':list(errors.values()),
+        **_project_principals(calls),
         'check':check, 'uncertain_write':bool(session.uncertain),
         'pending_mutation':bool(run.get('pending_mutation')),
-        'resources':deepcopy(run.get('resources', {})),
-        'response_read_hint':'Partial fields and response_projection_ref describe public projections, not full bodies. '
-            'Inspect complete responses in assigned Python variables using execute_code. '
-            'Exchange IDs identify host evidence. Keep completed writes; do not repeat them to recover output.'})
+        'resources':{key: value for key, value in run.get('resources', {}).items() if key != 'provider_fee'},
+        'response_read_hint':'Match named_rows IDs to their source operation. Read full bodies from saved Python variables. '
+            'Never replay completed writes for output.'})

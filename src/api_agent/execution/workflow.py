@@ -13,6 +13,7 @@ from api_agent.execution.contracts import _validate_extraction
 
 from api_agent.execution.contracts import CatalogLimits
 from api_agent.execution.observations import CatalogObservations
+from api_agent.execution.session_cookie import cookie_name_valid, cookie_schemes
 
 class CatalogWorkflow(CatalogObservations):
     """Закрепить допустимый каталог и проверяемые условия до первой модели."""
@@ -163,8 +164,9 @@ class CatalogWorkflow(CatalogObservations):
                 }:
                     raise ValueError("unsupported_binding_destination")
         if self.auth:
-            required = {"login_operation", "token_path", "body"}
-            if not required <= set(self.auth) or set(self.auth) - required - {"public_body_fields", "logout_operations"}:
+            cookie_auth = 'cookie_name' in self.auth
+            required = {"login_operation", "body", "cookie_name" if cookie_auth else "token_path"}
+            if not required <= set(self.auth) or set(self.auth) - required - {"public_body_fields", "logout_operations", "rotation"}:
                 raise ValueError("invalid_auth_mapping")
             logout = self.auth.get('logout_operations', [])
             if not isinstance(logout, list) or any(n not in self.allowed for n in logout):
@@ -173,8 +175,24 @@ class CatalogWorkflow(CatalogObservations):
             if not isinstance(public, list) or len(public) > 16 or any(not isinstance(k, str) or k not in self.auth["body"] for k in public) or len(set(public)) != len(public):
                 raise ValueError("invalid_public_identity_mapping")
             login = self.auth["login_operation"]
-            rule = self.extraction.get(login, {}).get(self.auth["token_path"])
-            if rule != {"type": "string", "secret": True}:
+            if cookie_auth and (not cookie_name_valid(self.auth['cookie_name']) or login not in self.allowed
+                    or not any(self.auth['cookie_name'] in cookie_schemes(op) for op in catalog.operations.values())
+                    or 'rotation' in self.auth):
+                raise ValueError('invalid_auth_mapping')
+            if 'rotation' in self.auth:
+                rotation = self.auth['rotation']
+                if (not isinstance(rotation, dict) or set(rotation) != {'operation_id', 'login_field', 'change_field'}
+                        or any(not isinstance(value, str) for value in rotation.values())):
+                    raise ValueError('selected_rotation_mapping')
+                change = catalog.operations.get(rotation['operation_id'], {})
+                fields = change.get('requestBody', {}).get('content', {}).get('application/json', {}).get('schema', {}).get('properties', {})
+                if (change.get('method') not in {'PUT', 'PATCH', 'POST'} or not change.get('security')
+                        or {} in change['security'] or rotation['login_field'] not in self.auth['body']
+                        or rotation['login_field'] in public or rotation['change_field'] not in fields
+                        or rotation['operation_id'] in {login, *logout}):
+                    raise ValueError('selected_rotation_mapping')
+            rule = self.extraction.get(login, {}).get(self.auth.get("token_path"))
+            if not cookie_auth and rule != {"type": "string", "secret": True}:
                 raise ValueError("secret_auth_extraction_required")
 
     def capability(self, op, name):
@@ -212,8 +230,14 @@ class CatalogWorkflow(CatalogObservations):
                 or len(alternatives) > 1
             ):
                 return "unsupported_auth_mapping"
-            if any(len(a) != 1 or next(iter(a.values())).get('scheme') != 'bearer' for a in alternatives):
-                return "unsupported_security_scheme"
+            for alternative in alternatives:
+                scheme = next(iter(alternative.values()))
+                cookie = (self.auth or {}).get('cookie_name')
+                if scheme.get('type') == 'apiKey' and scheme.get('in') == 'cookie':
+                    if self.auth_mode(name) == 'authenticated' and cookie != scheme['name']:
+                        return 'unsupported_security_scheme'
+                elif scheme.get('scheme') != 'bearer' or cookie and self.auth_mode(name) == 'authenticated':
+                    return 'unsupported_security_scheme'
         if not any(
             status.isdigit() and int(status) < 300 for status in op["responses"]
         ):

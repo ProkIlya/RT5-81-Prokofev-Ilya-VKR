@@ -8,6 +8,15 @@ GENERATION_REPAIR_HINT = (
 )
 
 
+def repeated_invalid_parameter(steps):
+    if len(steps) < 3:
+        return False
+    observations = [step.get('observation') or {} for step in steps[-3:]]
+    hint = observations[-1].get('hint')
+    return bool(hint) and all(item.get('error') == 'invalid_parameter_type'
+        and item.get('hint') == hint and item.get('requests_executed') == 0 for item in observations)
+
+
 class BudgetViolation(ValueError):
     """Безопасная причина отказа preflight/accounting без исходного prompt."""
 
@@ -36,6 +45,11 @@ class TokenBudget:
         self.unknown = False
         self.pending = False
         self.last_input = None
+
+    @property
+    def next_call_limit(self):
+        """Доступный резерв с учётом окна и уже расходованного общего лимита."""
+        return min(self.limits.max_context_tokens, self.limits.max_tokens_total - self.upper)
 
     def snapshot(self):
         known = self.calls > 0 and not self.unknown and not self.pending

@@ -29,6 +29,7 @@ class ProjectSetupDialog(FormDialog):
         super().__init__(title, PROJECT_FIELDS, values=values)
         self.report = None; self.checking = False; self.probe_names = ()
         self.connection = None
+        self.schema_only = not (self.values.get('connection_path') or self.values.get('mappings_path'))
 
     async def on_mount(self):
         super().on_mount()
@@ -59,9 +60,10 @@ class ProjectSetupDialog(FormDialog):
                     self.connection = (catalog.spec_hash, values['target'], result)
                     self.report = None
                     self.query_one('#project-diagnostics', Summary).update(
+                        'Схема входа будет сохранена вместе с проектом.' if result and self.schema_only else
                         'После сохранения будет использован вход из формы; импорт файла отключён.' if result else
                         'После сохранения вход и импорт файла будут отключены. Файлы на диске сохранятся.')
-            self.app.push_screen(ConnectionSetupDialog(catalog), selected)
+            self.app.push_screen(ConnectionSetupDialog(catalog, schema_only=self.schema_only), selected)
             return
         if event.button.id not in {'project-check', 'form-save'}:
             return super().on_button_pressed(event)
@@ -111,5 +113,5 @@ class ProjectSetupDialog(FormDialog):
             if digest != catalog.spec_hash or target != result['target']:
                 self.query_one('#project-diagnostics', Summary).update('Спецификация/адрес изменились. Настройте вход ещё раз.')
                 return
-            result = {**result, '_connection': mapping}
+            result = {**result, ('_login_schema' if self.schema_only else '_connection'): mapping}
         return super().dismiss(result)

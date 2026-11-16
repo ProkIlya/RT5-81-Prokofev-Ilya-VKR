@@ -36,7 +36,15 @@ class CardEditor(EditorDialog):
                     yield Static('Сначала отбираются запросы по операции, параметрам и авторизации. Затем выбирается первый, последний или каждый из них. Ожидаемый результат не участвует в отборе.',classes='field-help')
                     options=[('Без ограничения авторизации','any'),('Без авторизации','anonymous')]
                     if op['security']:options.append(('Текущая учётная запись','current'))
+                    policy=self.state.config.snapshot
+                    resettable_test=policy['mode']=='TEST' and policy['resettable']
+                    if op['method']=='GET' and op['security'] and {} not in op['security'] and resettable_test:
+                        options.append(('Отозванная авторизация после выхода','revoked'))
                     yield Select(options,value=self.card.get('auth','any'),allow_blank=False,id='card-auth')
+                    if op['method']=='POST' and 'requestBody' in op and resettable_test:
+                        yield Select([('Любой вызов операции входа','any'),('Вход со старым паролем после смены','previous'),
+                            ('Вход с новым паролем после смены','replacement')],value=self.card.get('login_variant','any'),
+                            allow_blank=False,id='card-login-variant')
                     if not op['security']:yield Static('Публичная операция по OpenAPI: текущая учётная запись для её отбора не требуется.',classes='field-help')
                     yield Static('Проверка успешного входа сама по себе не подтверждает авторизацию другого запроса.',classes='field-help')
                     yield Button('⚙ Параметры и источник значений',id='card-scope',
@@ -93,6 +101,9 @@ class CardEditor(EditorDialog):
                     self.query_one('#card-name-error',Static).update('Название должно содержать не более 200 символов');return
                 candidate={**deepcopy(self.card),'statuses':self.statuses(),'name':self.query_one('#card-name',Input).value.strip(),
                     'enabled':self.query_one('#card-enabled',Checkbox).value,'selector':self.query_one('#card-selector',Select).value,'auth':self.query_one('#card-auth',Select).value}
+                for widget in self.query('#card-login-variant'):
+                    if widget.value=='any':candidate.pop('login_variant',None)
+                    else:candidate['login_variant']=widget.value
                 self.state.compiled('Черновик условий',cards=[candidate]);self.dismiss(candidate)
         except ValueError as error:
             if key=='card-save':

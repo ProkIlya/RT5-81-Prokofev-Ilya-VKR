@@ -23,6 +23,22 @@ def _compatible(source, destination):
         for t in source_types if t != 'null')
 
 
+def response_reference_schema(catalog, allowed, reference):
+    _closed(reference, {'operation_id', 'path'}, {'where', 'occurrence'})
+    if 'occurrence' in reference and reference['occurrence'] not in ('first', 'last'):
+        raise ValueError('goal_invalid_scope')
+    name = reference['operation_id']
+    if not isinstance(name, str) or name not in allowed or name not in catalog.operations:
+        raise ValueError('goal_foreign_operation')
+    validate_where(catalog, allowed, name, reference.get('where', {}), references=False)
+    return _path_schema(_schema(catalog, {'id': '_source', 'operation_id': name}), reference['path'])
+
+
+def private_response_path(extraction, operation, path):
+    return any(rule.get('secret') and (path == secret or path.startswith(secret + '/'))
+               for secret, rule in extraction.get(operation, {}).items())
+
+
 def validate_where(catalog, allowed, operation_id, value, *, references=True):
     _closed(value, set(), {'parameters', 'body'})
     public_scope(value)
@@ -34,14 +50,7 @@ def validate_where(catalog, allowed, operation_id, value, *, references=True):
         if name not in descriptors: raise ValueError('goal_invalid_parameter_type')
         if isinstance(literal, dict) and set(literal) == {'response'}:
             if not references: raise ValueError('goal_invalid_parameter_type')
-            reference = literal['response']
-            _closed(reference, {'operation_id', 'path'}, {'where', 'occurrence'})
-            if 'occurrence' in reference and reference['occurrence'] not in ('first', 'last'):
-                raise ValueError('goal_invalid_scope')
-            source = reference['operation_id']
-            if not isinstance(source, str) or source not in allowed or source not in catalog.operations: raise ValueError('goal_foreign_operation')
-            validate_where(catalog, allowed, source, reference.get('where', {}), references=False)
-            field = _path_schema(_schema(catalog, {'id': '_source', 'operation_id': source}), reference['path'])
+            field = response_reference_schema(catalog, allowed, literal['response'])
             if not _compatible(field, descriptors[name]): raise ValueError('goal_invalid_parameter_type')
         elif schema_issues(literal, descriptors[name]):
             raise ValueError('goal_invalid_parameter_type')

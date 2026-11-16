@@ -28,6 +28,7 @@ from api_agent.desktop.components.widgets import SplitHandle
 from api_agent.desktop.presentation.presentation import error_text
 from api_agent.desktop.components.styles import COMPACT_CSS
 from api_agent.desktop.components.scrollbars import use_thin_scrollbars
+from api_agent.setup.login_profile import goal_login
 
 
 class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,ComposerMixin,App):
@@ -188,7 +189,8 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
                     offset=0
                     while True:
                         page=history.list_sessions(key,limit=20,offset=offset)
-                        for item in page['items']:self.store.add_session(key,item['session_id'],item['session_id'])
+                        for item in page['items']:
+                            self.store.add_session(key,item['session_id'],item['session_id'],restore_legacy=True)
                         if not page['more']:break
                         offset+=20
             except (ValueError,OSError,sqlite3.Error) as error:self.set_status('История проекта: '+str(error))
@@ -198,8 +200,10 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
         if self.project and not self.loading_draft:
             goal=self.query_one_optional('#goal',TextArea)
             if goal is None:return
+            changed=goal.text!=self.draft.get('goal')
             self.draft['goal']=goal.text
-            if self.draft!=self.store.draft(self.project,self.session):self.draft_revision+=1
+            public={**self.draft, 'goal':goal_login(goal.text)[0]}
+            if changed or public!=self.store.draft(self.project,self.session):self.draft_revision+=1
             self.store.save_draft(self.project,self.session,self.draft)
             self.refresh_composer()
 
@@ -239,9 +243,14 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
         count=sum(bool(c.get('enabled',True)) for c in self.draft.get('cards',[]))
         self.query_one('#conditions-edit',Button).label='Условия · '+str(count)+(' · 📎 '+str(len(self.draft.get('attachments',[]))) if self.draft.get('attachments') else '')
         record=self.store.model(self.draft.get('model_id'),required=False)
-        name=record['profile']['name'] if record else 'выбрать'
         button=self.query_one('#model-picker',Button)
-        button.label='Модель · '+(name if len(name)<=22 else name[:19]+'…');button.tooltip=name
+        if record:
+            name=record['profile']['name']
+            label=Text(name)
+            label.truncate(18, overflow='ellipsis')
+            button.label=label;button.tooltip=Text(name)
+        else:
+            button.label='Модель · выбрать';button.tooltip=None
         self.refresh_composer()
 
 
@@ -295,6 +304,7 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
     def create_project(self,values):
         if not values:return
         connection=values.pop('_connection',None)
+        login_schema=values.pop('_login_schema',None)
         try:
             from api_agent.openapi import load_source
             from api_agent.policy.config import ProjectConfig
@@ -312,6 +322,11 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
             path=self.store.path.parent/(sha256(project.encode('utf-8')).hexdigest()+'-connection.json')
             values=project_connection(values,previous['configuration'] if previous else {},connection,
                 path=path,scope={'project':project,'target':policy.snapshot['target'],'spec':catalog.spec_hash})
+            if login_schema is not None:
+                from api_agent.setup.login_profile import validate_login_schema
+                if login_schema:values['login_schema']=validate_login_schema(catalog,login_schema)
+            elif previous and previous['configuration'].get('login_schema'):
+                values['login_schema']=previous['configuration']['login_schema']
             values['image']=(previous['configuration'].get('image') if previous else None) or self.store.setting('worker_image',DEFAULT_WORKER)
             self.store.add_project(project,label,{k:v for k,v in values.items() if v})
             self.restore_sessions();sessions=self.store.sessions(project)
@@ -391,6 +406,7 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
             elif kind=='trace':
                 scope=(value['project'],value['session'])
                 if scope==(self.project,self.session):
+                    self.clear_submitted_password()
                     self.pending_goal=None;self.refresh_messages()
                 if self.inspected_run==value['run_id'] and self.inspected_scope==scope:
                     self.refresh_exchanges(preserve=True)
@@ -400,6 +416,7 @@ class AgentApp(NavigationMixin,ConversationMixin,InspectorMixin,SubmissionMixin,
                 if self.context_measurement and self.context_measurement[0] == value['run_id']:
                     self.context_measurement = None
                 if (value['project'],value['session'])==(self.project,self.session):
+                    self.clear_submitted_password()
                     self.pending_goal=None;self.refresh_messages()
                 if self.inspected_run==value['run_id'] and self.inspected_scope==(value['project'],value['session']):
                     self.finish_inspected()

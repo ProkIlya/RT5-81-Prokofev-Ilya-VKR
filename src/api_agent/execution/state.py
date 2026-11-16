@@ -128,6 +128,10 @@ class RunState:
             if k != "value" or not record["secret"]
         }
 
+    def protect_secret(self, value):
+        if isinstance(value, str) and value:
+            self._secrets.add(value)
+
     def protect(self, exchange):
         """Классифицировать secret paths до validator/ошибок, даже при плохом типе.
 

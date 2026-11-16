@@ -88,8 +88,19 @@ class Parser(SchemaParser):
         }
 
     def response(self, value, path, stack, depth, secret):
-        object_keys(value, {"description", "content"}, {"description"}, path)
+        object_keys(value, {"description", "content", "headers"}, {"description"}, path)
         result = {}
+        if "headers" in value:
+            headers = value['headers']
+            if (not isinstance(headers, dict) or len(headers) != 1
+                    or any(not isinstance(name, str) or name.lower() != 'set-cookie' for name in headers)):
+                raise OpenApiError('unsupported', path + '/headers')
+            for header in headers.values():
+                object_keys(header, {'description', 'schema'}, {'schema'}, path + '/headers/Set-Cookie')
+                schema = self.walk(header['schema'], 'schemas', path + '/headers/Set-Cookie/schema', stack, depth + 1)
+                if schema.get('type') != 'string':
+                    raise OpenApiError('unsupported', path + '/headers/Set-Cookie/schema')
+                result['headers'] = {'Set-Cookie': {'schema': schema}}
         if "content" in value:
             result["content"] = self.content(
                 value["content"], path + "/content", stack, depth
@@ -113,11 +124,12 @@ class Parser(SchemaParser):
         if (
             value["type"] == "apiKey"
             and set(value) <= {"type", "in", "name", "description"}
-            and value.get("in") == "header"
+            and value.get("in") in ("header", "cookie")
             and nonempty(value.get("name"))
             and re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", value["name"])
         ):
-            return {"type": "apiKey", "in": "header", "name": value["name"].lower()}
+            location = value['in']
+            return {'type': 'apiKey', 'in': location, 'name': value['name'].lower() if location == 'header' else value['name']}
         raise OpenApiError("invalid_security", path)
 
     def security(self, value, path):

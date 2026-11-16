@@ -9,6 +9,16 @@ def _confirmed_logout(catalog, exchange):
         and validate_exchange(catalog, exchange, [])['contract_verdict'] == 'pass')
 
 
+def confirmed_revocation(catalog, exchanges, logout_operations, principal):
+    """Последний подтверждённый logout относится к предъявленному actor/epoch."""
+    last = next((event for event in reversed(exchanges) if event['operation_id'] in logout_operations), None)
+    if last is None:
+        return False
+    before = last.get('request_principal') or {}
+    return (_confirmed_logout(catalog, last) and before.get('mode') == 'authenticated'
+            and before.get('actor') == principal.get('actor') and before.get('auth_epoch') == principal.get('auth_epoch'))
+
+
 def validate_auth_scope(value, catalog, name):
     scope = value.get('auth_scope')
     if 'auth_scope' not in value: return None
@@ -51,8 +61,4 @@ def auth_candidate(observation, exchange, run, index, principal, catalog):
     # Имена logout берутся из pinned application mapping, не из предметной области.
     exchanges = run.get('exchanges', [])
     metadata = (run.get('admission_manifest') or {}).get('goal_contract', {}).get('auth_scope_mapping', {})
-    logouts = [e for e in exchanges[:index] if e['operation_id'] in metadata.get('logout_operations', [])]
-    if not logouts: return False
-    last = logouts[-1]; before = last.get('request_principal') or {}
-    return (_confirmed_logout(catalog, last) and before.get('mode') == 'authenticated'
-        and before.get('actor') == actor['actor'] and before.get('auth_epoch') == actor.get('auth_epoch'))
+    return confirmed_revocation(catalog, exchanges[:index], metadata.get('logout_operations', []), actor)

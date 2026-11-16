@@ -8,9 +8,10 @@ from api_agent.desktop.components.widgets import PageDialog
 from api_agent.desktop.builder.constructor_state import typed_literal
 from api_agent.desktop.presentation.presentation import assertion_summary, error_text
 from api_agent.goals.checks.selected_compile import _assertion, _negative
+from api_agent.goals.checks.condition_scope import _compatible
 from api_agent.desktop.builder.schema_examples import example, decimal_text
 
-PREDICATES=[('Равно','equals'),('Не равно','not_equals'),('Поле существует','exists'),
+PREDICATES=[('Равно','equals'),('Равно полю предыдущего ответа','value_equal'),('Не равно','not_equals'),('Поле существует','exists'),
  ('Ответ соответствует схеме','schema'),('Число с округлением','number_rounded'),('Число с допуском','number_within'),('Коллекция JSON','collection')]
 
 
@@ -64,6 +65,12 @@ class AssertionEditor(PageDialog):
                     yield Static('Корень — всё JSON-тело ответа. /0/name — поле первого элемента массива.',classes='field-help')
                     yield Static('',id='assertion-path-error',classes='editor-error')
                     yield Input(placeholder='Ожидаемое значение; строка без кавычек',id='assertion-value')
+                    with Vertical(id='assertion-source'):
+                        yield Select([],prompt='Операция предыдущего ответа',id='assertion-source-operation')
+                        yield Select([],prompt='Совместимое поле предыдущего ответа',id='assertion-source-path')
+                        yield Select([('Последний ответ источника','last'),('Первый ответ источника','first')],
+                            value='last',allow_blank=False,id='assertion-source-occurrence')
+                        yield Input(placeholder='Отбор запроса источника, например {"body":{"value":57}}',id='assertion-source-where')
                     yield Static('',id='assertion-value-error',classes='editor-error')
                     yield Input(placeholder='Число с точкой: 0.10 (запятая преобразуется в точку)',id='assertion-number')
                     yield Input(placeholder='Допуск с точкой: 0.01',id='assertion-tolerance')
@@ -120,11 +127,39 @@ class AssertionEditor(PageDialog):
         self.query_one('#assertion-tolerance').display=kind=='number_within'
         for key in ['collection-mode','collection-json','collection-help']:self.query_one('#'+key).display=kind=='collection'
         self.query_one('#assertion-new').display=self.editing is not None
+        self.refresh_source()
         if kind=='collection' and not self.collection_dirty and self.query_one('#collection-json',TextArea).text==self.collection_generated:
             selected=field.value
             if selected is not Select.NULL:
                 self.collection_generated=json.dumps(example(self.fields[selected]),ensure_ascii=False,indent=2)
                 self.query_one('#collection-json',TextArea).text=self.collection_generated
+    def refresh_source(self):
+        visible=self.query_one('#assertion-kind',Select).value=='value_equal'
+        self.query_one('#assertion-source').display=visible
+        if not visible:return
+        path=self.query_one('#assertion-path',Select).value
+        fields={}
+        labels={}
+        if path in self.fields:
+            for row in self.state.operations():
+                name=row['id']
+                try:options=self.state.response_fields(name,[])
+                except ValueError:continue
+                compatible=[(key or 'Корень JSON-тела',key) for key,field in options.items()
+                    if _compatible(field,self.fields[path])]
+                if compatible:
+                    fields[name]=compatible
+                    labels[name]=row['method']+' '+row['path']
+        self.set_source_options('assertion-source-operation',list((label,name) for name,label in labels.items()))
+        operation=self.query_one('#assertion-source-operation',Select).value
+        self.set_source_options('assertion-source-path',fields.get(operation,[]))
+    def set_source_options(self,key,options):
+        select=self.query_one('#'+key,Select)
+        cache=getattr(self,'source_options',{})
+        if options==cache.get(key):return
+        previous=select.value;select.set_options(options)
+        if previous in {value for _,value in options}:select.value=previous
+        cache[key]=options;self.source_options=cache
     def on_text_area_changed(self,event):
         if event.text_area.id=='collection-json':
             self.collection_dirty=event.text_area.text!=self.collection_generated
@@ -133,6 +168,8 @@ class AssertionEditor(PageDialog):
             position=event.input.cursor_position;event.input.value=event.input.value.replace(',','.')
             event.input.cursor_position=position
     def on_select_changed(self,event):
+        if self.is_mounted and event.select.id in {'assertion-path','assertion-source-operation'}:
+            self.refresh_source()
         if self.is_mounted and event.select.id in {'assertion-target','assertion-kind','assertion-path'}:
             if event.select.id!='assertion-path':self.refresh_controls()
             elif (event.value==self.query_one('#assertion-path',Select).value
@@ -147,12 +184,22 @@ class AssertionEditor(PageDialog):
             if path is Select.NULL:raise ValueError('Выберите поле JSON-ответа')
             value['path']=path
         if kind in {'equals','not_equals'}:value['value']=typed_literal(self.query_one('#assertion-value',Input).value,self.fields[value['path']])
+        elif kind=='value_equal':
+            operation=self.query_one('#assertion-source-operation',Select).value
+            path=self.query_one('#assertion-source-path',Select).value
+            if Select.NULL in (operation,path):raise ValueError('Выберите операцию и поле предыдущего ответа')
+            source={'operation_id':operation,'path':path,
+                'occurrence':self.query_one('#assertion-source-occurrence',Select).value}
+            where=self.query_one('#assertion-source-where',Input).value.strip()
+            if where:source['where']=json.loads(where)
+            value['source']=source
         elif kind.startswith('number_'):
             value['expected']=decimal_text(self.query_one('#assertion-number',Input).value)
             if kind=='number_within':value['tolerance']=decimal_text(self.query_one('#assertion-tolerance',Input).value)
         elif kind=='collection':
             value.update(mode=self.query_one('#collection-mode',Select).value,rows=collection_rows(json.loads(self.query_one('#collection-json',TextArea).text)))
-        _assertion(value,self.fields.get(''));return value
+        _assertion(value,self.fields.get(''),catalog=self.state.catalog,
+            allowed=self.state.config.snapshot['operations']);return value
     def on_key(self,event):
         if event.key=='backspace' and isinstance(self.focused,DataTable) and self.focused.id=='batch-assertions':
             self.on_button_pressed(Button.Pressed(self.query_one('#batch-delete',Button)));event.stop();event.prevent_default()
@@ -184,6 +231,12 @@ class AssertionEditor(PageDialog):
                 v=item.get('value','');self.query_one('#assertion-value',Input).value=v if isinstance(v,str) else json.dumps(v)
                 self.query_one('#assertion-number',Input).value=str(item.get('expected',''))
                 self.query_one('#assertion-tolerance',Input).value=str(item.get('tolerance',''))
+                if item['predicate']=='value_equal':
+                    source=item['source'];self.refresh_source()
+                    self.query_one('#assertion-source-operation',Select).value=source['operation_id'];self.refresh_source()
+                    self.query_one('#assertion-source-path',Select).value=source['path']
+                    self.query_one('#assertion-source-occurrence',Select).value=source.get('occurrence','last')
+                    self.query_one('#assertion-source-where',Input).value=json.dumps(source['where'],ensure_ascii=False) if 'where' in source else ''
                 if item['predicate']=='collection':self.query_one('#collection-mode',Select).value=item['mode'];self.query_one('#collection-json',TextArea).text=rows_json(item['rows'])
             elif key=='negative-clear':self.negative=None;self.refresh_rows()
             elif key=='negative-add':

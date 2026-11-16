@@ -9,12 +9,13 @@ import time
 from pathlib import Path
 
 from api_agent.agent.model import ModelError, ModelTimeout, configured_goal_model, goal_sampling
-from api_agent.agent.resilience import BudgetViolation, EmptyDecision, TokenBudget, GENERATION_REPAIR_HINT
+from api_agent.agent.resilience import BudgetViolation, EmptyDecision, TokenBudget, GENERATION_REPAIR_HINT, repeated_invalid_parameter
 from api_agent.bounded_json import validate_tree, numeric_metadata
 from api_agent.openapi.parser import canonical
-from api_agent.agent.response_views import prioritize_root_locator, response_page
+from api_agent.agent.response_views import prioritize_root_locator, response_feedback, response_page
+from api_agent.goals.checks.condition_scope import subset
 from api_agent.workspace.context.context_window import compact_payload
-from api_agent.workspace.context.run_memory import memory_snapshot, project_recovery
+from api_agent.workspace.context.run_memory import memory_snapshot, project_recovery, read_request_identity
 from api_agent.validation import fingerprint, report, schema_issues, display_value
 from api_agent.workspace.execution.broker import WorkspaceBroker, WorkspaceError
 from api_agent.workspace.execution.sandbox import WorkspaceSandbox
@@ -22,7 +23,13 @@ from api_agent.workspace.sdk import SdkArtifact
 from api_agent.workspace.context.prompt import FINISH_SCHEMA, initial_messages, payload
 from api_agent.workspace.execution.diagnostics import HINTS
 from api_agent.workspace.context.state_view import execution_state
-from api_agent.workspace.context.finish_feedback import unsupported_passes, correction, GOAL_PROGRESS_HINT
+from api_agent.workspace.context.transition_feedback import fresh_transition_hint
+from api_agent.workspace.context.finish_feedback import (
+    GOAL_PROGRESS_HINT, catalog_selection_hint, collection_mismatch_hint, comparison_mismatch_hint, contract_mismatch_hint, correction,
+    early_selected_progress, empty_collection_hint,
+    import_recovery_hint, missing_key_after_unchanged_read, post_refusal_hint,
+    repeated_read_key_error, repeated_read_loop, repeated_read_progress, research_finish_hint, selected_finish_hint, selected_read_finish_hint, uncertain_review_hint, unsupported_passes,
+)
 
 
 @dataclass(frozen=True)
@@ -108,7 +115,7 @@ def _completed_writes(broker):
             or exchange.get('outcome') not in {'received', 'invalid_json', 'invalid_content_type'}
             or exchange.get('truncated') or type(status) is not int or not 200 <= status < 300):
             continue
-        item = {'operation_id': name, 'status': status,
+        item = {'exchange_id': exchange['id'], 'operation_id': name, 'status': status,
             'parameters': display_value(public(exchange.get('request_parameters', {})))}
         body = (exchange.get('request') or {}).get('json')
         if body is not None: item['body'] = display_value(public(body))
@@ -122,16 +129,55 @@ def _completed_writes(broker):
     return broker.safe(result)
 
 
-def _response_feedback(broker, exchange):
-    """Preview сохраняет тип JSON; полное evidence и Python response не меняются."""
-    response = exchange.get('response') or {}
-    value = broker.safe(response.get('json'))
-    result = {'operation_id': exchange['operation_id'], 'status': response.get('status'), 'body': value}
-    if len(canonical(value)) > 1024:
-        view = response_page(prioritize_root_locator(value), limit=16, max_bytes=2048)
-        result['body'] = view.pop('value')
-        result['body_view'] = view
-    return result
+def _unchanged_reads(broker, before):
+    """Равные HTTP-наблюдения между записями, независимо от текста Python."""
+    exchanges = broker.run['exchanges']
+    if before == len(exchanges):
+        return []
+    previous = {}
+    repeated = []
+    for index, exchange in enumerate(exchanges):
+        name = exchange['operation_id']
+        if broker.catalog.operations[name]['method'] not in {'GET', 'HEAD'}:
+            previous.clear()
+            continue
+        key = read_request_identity(exchange)
+        response = exchange.get('response') or {}
+        status = response.get('status')
+        if (exchange['outcome'] != 'received' or exchange.get('truncated')
+                or not response.get('json_valid') or type(status) is not int or not 200 <= status < 300):
+            previous.pop(key, None)
+            continue
+        value = fingerprint([status, response['json']])
+        last = previous.get(key)
+        if index >= before and last is not None and last[1] == value:
+            repeated.append({'operation_id': name, 'request_index': index + 1,
+                             'previous_request_index': last[0] + 1})
+        previous[key] = index, value
+    return repeated
+
+
+def _unobserved_sources(broker):
+    """Подсветить принятые ссылки на запросы, которых ещё нет в журнале."""
+    sources = {}
+    for observation in broker.workflow.accepted.snapshot['observations']:
+        for value in observation['where'].get('parameters', {}).values():
+            if not isinstance(value, dict) or set(value) != {'response'}:
+                continue
+            source = value['response']
+            name = source['operation_id']
+            where = source.get('where', {})
+            if name not in broker.workflow.allowed or any(
+                exchange['operation_id'] == name
+                and subset(where.get('parameters', {}), exchange.get('request_parameters', {}))
+                and subset(where.get('body', {}), exchange['request'].get('json', {}))
+                for exchange in broker.run['exchanges']
+            ):
+                continue
+            operation = broker.artifact.manifest['operations'][name]
+            entry = {'function': 'api.' + operation['python_name'], 'request_criteria': display_value(where)}
+            sources[fingerprint(entry)] = entry
+    return broker.safe(list(sources.values())[:4])
 
 
 def _drive(broker, worker, model, budget, options):
@@ -144,8 +190,7 @@ def _drive(broker, worker, model, budget, options):
     feedback_checks = None
     initial = json.loads(messages[context_index]['content'])
     if 'checks' in initial:
-        # До первого feedback технические IDs не нужны для выбора действий.
-        # Сохраняем полные descriptors для привязки последующих verdicts.
+        # Полные descriptors вернутся после первого feedback для привязки verdicts.
         feedback_checks = deepcopy(initial['checks'])
         for check in initial['checks']: check.pop('condition_id', None)
     initial['state'] = execution_state(broker, [], {}, False)
@@ -166,13 +211,13 @@ def _drive(broker, worker, model, budget, options):
             try:
                 broker.event('model_preflight_started')
                 if hasattr(model, 'set_deadline'): model.set_deadline(broker.session.deadline)
-                request = payload(messages, options.model_name, broker.limits)
+                request = payload(messages, options.model_name, broker.limits, mode=initial['mode'], separate_lookup='row_values' in initial)
                 if options.snapshot is not None: request.update(options.snapshot['sampling'])
                 if hasattr(model, 'prepare_payload'): request = model.prepare_payload(request)
                 if broker.safe(request) != request: raise WorkspaceError('private_model_context')
                 request, measured = compact_payload(request, prefix_count=base_count,
                     memory=lambda:memory_snapshot(broker.workflow, broker.run, broker.session, broker.safe),
-                    counter=budget.counter, context_tokens=broker.limits.max_context_tokens)
+                    counter=budget.counter, context_tokens=budget.next_call_limit)
                 if measured:
                     if measured['input_tokens_after'] < measured['input_tokens_before']:
                         broker.run.setdefault('context_projections', []).append({**measured,'model_call':index + 1})
@@ -232,7 +277,10 @@ def _drive(broker, worker, model, budget, options):
             run['resources'] = budget.snapshot()
             broker.event('model_received', {'step': index + 1})
             broker.guard()
-            try: call, name, args = _decision(response)
+            try:
+                call, name, args = _decision(response)
+                if name not in step['offered_tools']:
+                    raise ValueError('tool_not_offered')
             except (ValueError, TypeError, KeyError, IndexError, EmptyDecision) as error:
                 is_empty = isinstance(error, EmptyDecision)
                 empty = empty + 1 if is_empty else 0
@@ -241,7 +289,8 @@ def _drive(broker, worker, model, budget, options):
                 broker.event('code_decision_rejected', {'kind': step['decision_kind']})
                 if empty >= broker.limits.max_empty_steps or malformed > broker.limits.malformed_retries:
                     broker.stop('empty_limit' if is_empty else 'malformed_limit'); return
-                messages.append({'role': 'user', 'content': 'Return exactly one valid call to execute_code, check_goal or finish_run. No API operation tool is available.'})
+                messages.append({'role': 'user', 'content': 'Return exactly one valid call from the offered tools: '
+                    + ', '.join(step['offered_tools']) + '. No API operation tool is available.'})
                 continue
             empty = 0
             step['action'] = {'name': name, 'arguments': {'code': {'stored_in': 'code_executions'}} if name == 'execute_code' else broker.safe(args)}
@@ -250,12 +299,12 @@ def _drive(broker, worker, model, budget, options):
             repeated = action_key in seen_actions
             seen_actions.add(action_key)
             event_offset = len(run['events'])
-            # Native call_id остаётся только в RAM; durable связь назначается приложением.
             if name == 'execute_code':
                 result = worker.execute(args['code'], call_id='model-step-' + str(index + 1))
+                broker.begin_uncertain_review(before)
             else:
-                if name == 'finish_run' and not {'claims', 'answer_fields'} <= args.keys():
-                    saved = broker.workflow.handle_tool(broker.session, 'check_goal', {})
+                saved = broker.workflow.handle_tool(broker.session, 'check_goal', {}) if name == 'finish_run' else None
+                if saved is not None and not {'claims', 'answer_fields'} <= args.keys():
                     missing = sorted({'claims', 'answer_fields'} - args.keys())
                     args.setdefault('claims', [{k: c[k] for k in ('condition_id', 'verdict')}
                                                for c in saved['conditions']])
@@ -263,11 +312,15 @@ def _drive(broker, worker, model, budget, options):
                     broker.event('finish_defaults_applied', {'fields': missing,
                         'basis': 'accepted_goal_saved_evidence'})
                 try:
-                    missing=unsupported_passes(args.get('claims',[]),broker.workflow.handle_tool(broker.session,'check_goal',{})) if name=='finish_run' else []
+                    missing = unsupported_passes(args.get('claims', []), saved) if saved is not None else []
                     if missing:
                         finish_rejections+=1
-                        result={'error':'unverified_success','hint':correction(broker.workflow,missing)}
+                        result={'error':'unverified_success','hint':correction(broker,saved)}
                         broker.event('unsupported_finish_rejected',{'condition_ids':missing,'attempt':finish_rejections})
+                    elif saved is not None and (review := research_finish_hint(broker) or
+                            {'basis': 'incomplete_selected_evidence', 'hint': selected_finish_hint(broker, saved)})['hint']:
+                        result = {'error': 'finish_reconsidered', 'hint': review['hint']}
+                        broker.event('finish_reconsidered', {'basis': review['basis']})
                     else:
                         result = broker.dispatch({'kind': 'finish' if name == 'finish_run' else name,
                             'artifact_hash': options.artifact.hash, **args})
@@ -275,10 +328,11 @@ def _drive(broker, worker, model, budget, options):
                     if broker.stopped: raise
                     result = {'error': str(error)}
             execution_id = result.get('execution_id')
-            denied = [e['details']['reason'] for e in run['events'][event_offset:] if e['kind'] == 'call_rejected']
+            denied = [e['details'] for e in run['events'][event_offset:] if e['kind'] == 'call_rejected']
             if denied:
-                result['error'] = denied[0]
-            if 'approval_rejected' in denied and getattr(broker.workflow,'selected_checks',False):
+                result['error'] = denied[0]['reason']
+                if 'repair_hint' in denied[0]: result['hint'] = denied[0]['repair_hint']
+            if any(event['reason'] == 'approval_rejected' for event in denied) and getattr(broker.workflow,'selected_checks',False):
                 # Явный отказ — граница текущего пользовательского запуска. Не выдаём
                 # модели новый ход для повторного планирования отклонённой мутации.
                 # Старый broker по-прежнему умеет независимое чтение в legacy-тестах.
@@ -289,11 +343,18 @@ def _drive(broker, worker, model, budget, options):
             if result.get('error') == 'NameError':
                 result['hint'] = 'Define variables before use. Inside Python call the listed api functions; execute_code is an outer tool, not a Python function.'
             if result.get('error') in {'ModuleNotFoundError', 'ImportError'}:
-                result['hint'] = 'Remove the failing import. The api object is already available; call its listed functions directly. Do not install packages.'
+                result['hint'] = import_recovery_hint(broker, checklist)
             if result.get('error') == 'duplicate_semantic_action':
                 result['hint'] = ('Do not repeat this API call: the same semantic action already occurred and was not sent again. '
                     'Remove the rejected call. Keep existing response variables and continue only missing work. '
                     'Successful writes are listed in state.completed_writes; earlier failures remain evidence.')
+            if result.get('error') == 'auth_reference_denied':
+                login = (broker.workflow.auth or {}).get('login_operation')
+                if login in broker.workflow.allowed:
+                    function = options.artifact.manifest['operations'][login]['python_name']
+                    result['hint'] = ('No protected request was sent. If the goal permits signing in, call api.' + function
+                        + '() once without arguments; the application supplies the login fields and keeps the credential. '
+                          'Retry only the blocked call after a successful login. Otherwise report the limitation.')
             if result.get('error') == 'AttributeError' and result.get('error_object_type'):
                 result['hint'] = 'Attribute access failed on a ' + result['error_object_type'] + '. API responses are dicts: response["body"], not response.body. JSON objects use ["field"]; JSON lists use numeric indexes.'
             if result.get('error_detail'):
@@ -312,27 +373,42 @@ def _drive(broker, worker, model, budget, options):
                     {k: c[k] for k in (('condition_id', 'verdict') if c['verdict'] == 'PASS'
                         else ('condition_id', 'verdict', 'expected', 'actual'))} for c in checklist['conditions']],
                     'answer_fields': checklist['answer_fields']},
-                'responses': [_response_feedback(broker, e) for e in run['exchanges'][before:]],
+                'responses': [response_feedback(broker, e) for e in run['exchanges'][before:]],
                 'state': ({**execution_state(broker, workspace_variables, variable_types, checklist['verdict'] == 'PASS'),
                      'completed_writes': _completed_writes(broker)})})
-            if repeated:
+            unchanged_reads = _unchanged_reads(broker, before)
+            missing_key_hint = ''
+            if unchanged_reads:
+                result['unchanged_reads'] = unchanged_reads
+                missing_key_hint = missing_key_after_unchanged_read(run['exchanges'], before, unchanged_reads, result.get('error_detail'))
+                if missing_key_hint:
+                    result['hint'] = missing_key_hint
+                result['warning'] = ('These reads returned the same JSON for the same requests. Use the actual data '
+                    'in responses or a saved Python response variable, then perform the next missing goal action. '
+                    'Read again when verifying a write, checking freshness requested by the user, '
+                    'or polling a documented asynchronous result within the remaining limits.')
+            elif repeated:
                 result['warning'] = 'You repeated the same action. Consider its previous result before repeating it again.'
             result['state'].pop('requests_complete', None)
             result['state']['selected_checks_verdict'] = checklist['verdict']
             result['check']['coverage'] = broker.workflow.accepted.snapshot['coverage']
             result['check']['goal_verdict'] = 'UNKNOWN'
             step['observation'] = result
+            if result.get('error') == 'invalid_parameter_type' and repeated_invalid_parameter(run['steps']):
+                broker.stop('repeated_invalid_parameter'); return
+            if missing_key_hint and repeated_read_key_error(run['steps'], result):
+                broker.stop('repeated_read_key_error'); return
+            if unchanged_reads and repeated_read_loop(broker, result):
+                broker.stop('repeated_read'); return
             if finish_rejections>=2:
                 broker.stop('unverified_finish');return
-            broker.event('model_observed', {'step': index + 1, 'tool': name,
-                'execution_id': execution_id})
+            broker.event('model_observed', {'step': index + 1, 'tool': name, 'execution_id': execution_id})
             if broker.finished or broker.stopped: return
             context_call = deepcopy(call)
             task_context = json.loads(messages[context_index]['content'])
             task_context['state'] = result['state']
             if feedback_checks is not None: task_context['checks'] = deepcopy(feedback_checks)
             messages[context_index]['content'] = json.dumps(task_context, ensure_ascii=False)
-            # Полные пары остаются в очереди сообщений до измеренного сжатия.
             model_observation = deepcopy(result)
             model_observation.pop('state', None)
             messages.extend([{'role': 'assistant', 'content': '', 'tool_calls': [context_call]},
@@ -343,17 +419,38 @@ def _drive(broker, worker, model, budget, options):
                 messages.append({'role': 'user', 'content': 'Correct the rejected code at Python line '
                     + str(diagnostic.get('line')) + '. '
                     + diagnostic['hint'] + ' Return the corrected execute_code call.'})
-            if result.get('error') and result.get('hint'):
+            if name == 'execute_code' and result.get('error') and result.get('hint'):
                 messages.append({'role': 'user', 'content': 'Correct the Python error at line '
                     + str(result.get('error_line')) + '. ' + result['hint']
                     + ' Keep earlier completed requests; continue only missing work.'})
-            messages.append({'role':'user','content':GOAL_PROGRESS_HINT})
+            progress = (collection_mismatch_hint(broker, checklist, before) + comparison_mismatch_hint(broker, checklist)
+                        + contract_mismatch_hint(broker, checklist) + fresh_transition_hint(broker, checklist, before)
+                        + post_refusal_hint(broker, before) + empty_collection_hint(broker, before)
+                        + catalog_selection_hint(broker, before) + GOAL_PROGRESS_HINT)
+            progress = (early_selected_progress(broker, checklist, before) + selected_read_finish_hint(broker, checklist, before)
+                        + repeated_read_progress(broker, checklist, unchanged_reads) + progress)
+            if broker.session.uncertain_review_start is not None:
+                progress = uncertain_review_hint(broker) + progress
+            if name == 'finish_run' and result.get('hint'):
+                progress = result['hint'] + ' ' + progress
+            if (repeated and result.get('requests_executed') == 0 and not result.get('error')
+                    and run['exchanges']):
+                progress = ('This local block repeated without new evidence. Inspect the saved response fields before '
+                    'filtering or claiming absence. For case-insensitive text search, normalize both strings with '
+                    'str.casefold(). Change the local analysis or return the supported answer. ' + progress)
+            fresh_ids = {exchange['id'] for exchange in run['exchanges'][before:]}
+            new_evidence = any(item.get('exchange_id') in fresh_ids for item in (*checklist['conditions'], *run.get('completed_mutations', [])))
+            first_source_hint = new_evidence and not any(e['kind'] == 'unobserved_source_hint' for e in run['events'])
+            if not broker.session.uncertain and (unchanged_reads or first_source_hint) and (sources := _unobserved_sources(broker)):
+                if first_source_hint: broker.event('unobserved_source_hint')
+                progress = ('These accepted checks reference source requests that have not been observed: '
+                    + json.dumps(sources, ensure_ascii=False) + '. Use the original goal and API reference. Check the criteria '
+                    'to distinguish the source from earlier calls to the same operation. Complete prerequisites in the order requested and use the observed ID from the matching request. ' + progress)
+            messages.append({'role':'user','content':progress})
         broker.stop('step_limit')
     finally:
-        # Raw code/context не являются durable history, включая private encoded literals.
         messages.clear()
         seen_actions.clear()
-
 
 def run_workspace(workflow, history, options, *, session_id, message_id, model, limits,
                   token_counter=None, parent_run_id=None, trace_sink=None, event_sink=None):

@@ -14,9 +14,10 @@ from api_agent.goals.entry.continuation import ContinuationApplication
 
 class ManualApplication(ContinuationApplication, ApplicationContext):
     def __init__(self, catalog, config, *, history, workspace, human=None, limits=None,
-                 mappings=None, token_counter=None, current_config=None, trace_sink=None,
+                 mappings=None, token_counter=None, current_config=None, trace_sink=None, project_metadata=None,
                  event_sink=None, model_test_passwords=None, source='user_import'):
         self.configuration_source = source
+        self.project_metadata = deepcopy(project_metadata)
         super().__init__(catalog, config, history=history,
             human=human, limits=limits or CatalogLimits(), token_counter=token_counter,
             mappings=mappings, current_config=current_config, trace_sink=trace_sink, event_sink=event_sink,
@@ -73,6 +74,7 @@ class ManualApplication(ContinuationApplication, ApplicationContext):
             preparation=preparation, model_name=self.model_name, current_config=self.current_config,
             **{k: deepcopy(v) for k, v in self.mappings.items() if k in {'auth','extraction','binding_rules','private_bodies','public_response_headers'}})
         workflow.runtime_mapping_hash = fingerprint({k: v for k, v in self.mappings.items() if k != 'health_check'})
+        workflow.project_metadata = self.project_metadata
         from api_agent.storage.reuse import actor_identity
         workflow.actor_identity_hash = actor_identity(self.mappings)
         return workflow

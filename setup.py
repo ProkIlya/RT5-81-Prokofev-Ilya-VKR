@@ -10,7 +10,7 @@ import sys
 import uuid
 import venv
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 
 
 def docker_command(directory):

@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 
-from api_agent.execution.contracts import CatalogLimits
+from api_agent.execution.contracts import CatalogArgumentsError, CatalogLimits
 from api_agent.bounded_json import validate_tree
 from api_agent.openapi.parser import canonical
 from api_agent.validation import fingerprint, validate_exchange, report
@@ -17,6 +17,7 @@ ERROR_CODES = set(('artifact_denied protocol_denied operation_denied invalid_par
     'request_limit cancelled uncertain_write run_time_limit stale_approval policy_denied config_scope_changed '
     'stale_auth_epoch unresolved_uncertain_write approval_rejected approval_required workspace_finished '
     'clarification_unavailable goal_revision_required input_slot_locked invalid_human_input human_cancelled human_unanswered '
+    'selected_rotation_logout_required '
     'ask_limit invalid_question clarification_required precondition_not_verified target_not_applicable '
     'required_parameter_missing invalid_parameter_type unsafe_parameter_value unsafe_path_parameter '
     'required_body_missing invalid_request_body body_denied credential_body_is_private request_body_limit '
@@ -203,11 +204,34 @@ class WorkspaceBroker:
     def guard(self):
         if self.finished: raise WorkspaceError('workspace_finished')
         if self.cancel.is_set(): self.stopped = self.stopped or 'cancelled'
-        if self.session.uncertain: self.stopped = 'uncertain_write'
+        if self.session.uncertain and self.session.uncertain_review_start is None:
+            self.stopped = self.stopped or 'uncertain_write'
         if not self.stopped:
             try: self.session.remaining()
             except ValueError: self.stopped = 'run_time_limit'
         if self.stopped: raise WorkspaceError(self.stopped)
+
+    def begin_uncertain_review(self, before):
+        """Допускает два разрешённых чтения, сохраняя неопределённость записи."""
+        if (self.stopped or not self.session.uncertain or self.session.uncertain_review_start is not None
+                or not getattr(self.workflow, 'selected_checks', False)):
+            return
+        snapshot = self.workflow.accepted.snapshot
+        pending = self.run.get('pending_mutation') or {}
+        name = pending.get('operation_id')
+        auth = self.workflow.auth or {}
+        auth_operations = {auth.get('login_operation'), *auth.get('logout_operations', []),
+                           (auth.get('rotation') or {}).get('operation_id')}
+        if (snapshot['mode'] != 'testing' or name in auth_operations
+                or not any(item['operation_id'] == name for item in snapshot['observations'])):
+            return
+        if not any(exchange['operation_id'] == name and exchange.get('effect_status') == 'uncertain'
+                   and exchange.get('transport_error') in {'timeout', 'disconnect'}
+                   for exchange in self.run['exchanges'][before:]):
+            return
+        self.session.uncertain_review_start = self.session.requests
+        self.event('uncertain_review_started', {'operation_id': name,
+            'read_limit': self.session.uncertain_reads_remaining})
 
     def dispatch(self, message):
         """Полный IPC request недоверенный; неизвестные поля не игнорируются."""
@@ -224,6 +248,11 @@ class WorkspaceBroker:
             required, optional = fields[kind]
             keys = set(message) - {'kind', 'artifact_hash'}
             if not required <= keys or keys - required - optional: raise WorkspaceError('protocol_denied')
+            if self.session.uncertain:
+                if kind == 'operation' and not self.session.uncertain_read_allowed(message['operation_id']):
+                    raise WorkspaceError('uncertain_write')
+                if kind not in {'operation', 'check_goal', 'finish'}:
+                    raise WorkspaceError('uncertain_write')
             if kind == 'operation': return self._operation(message)
             if kind == 'check_goal':
                 if hasattr(self.workflow, 'handle_tool'): return self.safe(self.workflow.handle_tool(self.session, 'check_goal', {}))
@@ -250,7 +279,14 @@ class WorkspaceBroker:
             if reason in {'request_limit', 'cancelled', 'uncertain_write', 'run_time_limit', 'stale_approval',
                           'policy_denied', 'config_scope_changed', 'stale_auth_epoch', 'unresolved_uncertain_write'}:
                 self.stopped = self.stopped or reason
-            self.event('call_rejected', {'reason': reason})
+            details = {'reason': reason}
+            if reason == 'invalid_parameter_type' and isinstance(error, CatalogArgumentsError):
+                operation = self.artifact.manifest['operations'][message['operation_id']]
+                name = next((item['python_name'] for item in operation['parameter_mapping']
+                    if (item['in'], item['name']) == error.parameter), None)
+                prefix = f'Correct SDK argument {name} in api.{operation["python_name"]}. ' if name else ''
+                details['repair_hint'] = prefix + error.repair_hint
+            self.event('call_rejected', details)
             raise WorkspaceError(reason) from None
 
     def _operation(self, message):
@@ -290,8 +326,9 @@ class WorkspaceBroker:
             args.setdefault('bindings', {})[key] = refs[0]['ref']
             del supplied[key]
         mode = self.workflow.request_mode(name, slot)
-        if mode == 'authenticated':
+        if mode == 'authenticated' and self.session.cookie is None and self.session.revoked_credential(args, supplied) is None:
             auth = self.workflow.auth
+            if not auth: raise WorkspaceError('auth_reference_denied')
             refs = [r for r in self.session.state.public() if r['secret'] and r['operation_id'] == auth['login_operation']
                 and r['path'] == auth['token_path'] and r.get('auth_epoch') == self.session.state.auth_epoch
                 and r.get('principal') == self.session.state.principal]

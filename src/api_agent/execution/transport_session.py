@@ -29,6 +29,9 @@ class ChainSession:
         self.max_requests = limits.max_requests
         self.exchanges = []
         self.state = RunState(run["project_id"], self.run_id, workflow.rules())
+        from api_agent.execution.session_cookie import SessionCookie
+        cookie_name = (workflow.auth or {}).get('cookie_name') if hasattr(workflow, 'auth') else None
+        self.cookie = SessionCookie(cookie_name) if cookie_name else None
         self.actions = set()
         self.uncertain = False
         self._headers = {}
@@ -70,6 +73,7 @@ class ChainSession:
         )
         headers=request_headers(self.port,op['method'],body,self._headers)
         response_headers=None;watchdog=None;raw_content_type=''
+        cookie_login = self.cookie is not None and op_id == self.workflow.auth['login_operation']
         try:
             connection.connect()
             with SocketDeadline(
@@ -78,6 +82,8 @@ class ChainSession:
                 connection.request(op["method"], path, body=body, headers=headers)
                 response = connection.getresponse()
                 response_headers=response.getheaders()
+                if cookie_login:
+                    self.cookie.capture(response, self.target + path, self.state.protect_secret)
                 raw_content_type=response.getheader('Content-Type','')
                 exchange["response"] = {
                     "status": response.status,
@@ -105,10 +111,15 @@ class ChainSession:
                         chunks.append(chunk)
                         size += len(chunk)
                     exchange["bytes_total"] = size
+                    declared = op['responses'].get(str(response.status))
+                    header_only = (cookie_login and not size and 200 <= response.status < 300
+                                   and declared is not None and not declared.get('content'))
                     if size > self.max_response_bytes:
                         exchange.update(outcome="response_limit", truncated=True)
                     elif response.length is not None and response.length > 0:
                         exchange.update(outcome="incomplete_response", truncated=True)
+                    elif header_only:
+                        exchange['outcome'] = 'received'
                     else:
                         try:
                             value = json.loads(
@@ -123,7 +134,7 @@ class ChainSession:
                             exchange["response"].update(json=value, json_valid=True)
                             exchange["outcome"] = "received"
                     if (
-                        exchange["outcome"] in {"received", "invalid_json"}
+                        not header_only and exchange["outcome"] in {"received", "invalid_json"}
                         and raw_content_type
                         .split(";")[0]
                         .strip()
